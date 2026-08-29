@@ -1,0 +1,7 @@
+{
+  "name": "sim-suite",
+  "runner": "local",
+  "identity": "local",
+  "entrypoint": "../sim-suite",
+  "notes": "メタ安全保障4シミュレーターを2回ずつ実走して決定論を確認し、studio-run-bundle (live-command) を生成する。外部API・GPU不要"
+}
