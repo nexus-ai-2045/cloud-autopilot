@@ -1,0 +1,9 @@
+{
+  "name": "cloud-autopilot-sim-smoke",
+  "runner": "kaggle",
+  "identity": "kaggle-main",
+  "entrypoint": "kernel",
+  "gpu": true,
+  "fallback": ["local"],
+  "notes": "シード固定 Schelling モデルの実走サンプル。Kaggle 無料 GPU 枠を数分だけ使う。失敗時は同じスクリプトが local で走る"
+}

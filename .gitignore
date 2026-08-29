@@ -1,0 +1,17 @@
+# ---- 名義・認証情報 (repo に絶対入れない) ----
+config.local.json
+
+# ---- 実行時生成物 (台帳・ジョブ出力。ローカルのみ) ----
+data/
+jobs/**/output/
+jobs/**/kernel-metadata.json
+
+# ---- ローカル専用の作業ファイル ----
+_local/
+.claude/
+
+# ---- Python / テスト ----
+__pycache__/
+*.pyc
+.pytest_cache/
+.pytest-tmp/
