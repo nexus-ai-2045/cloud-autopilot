@@ -1,21 +1,29 @@
-# PREFLIGHT
+<!-- repo-preflight:review-record -->
 
-この repo は公開・push の前に [repo-preflight](https://github.com/nexus-ai-2045/repo-preflight)
-で機械検査します。
+# 公開準備状況
 
-## 検査項目 (公開時に pass を確認済み)
+- HEAD: `public-main` (fresh history、この記録を含む commit が最新)
+- 確認日時: `2026-08-29`
+- 判定: `ready_for_public_review`
 
-- secret 候補スキャン: 0 件
-- 個人パス・名義スキャン: 0 件 (アカウント名は `config.local.json` に外出しする設計)
-- 全履歴の個人識別子 grep: 0 件 (initial commit のみの fresh history)
-- 必須文書: README / LICENSE / SECURITY / CONTRIBUTING / PREFLIGHT
-- clean worktree + テスト緑
+## 確認済み
 
-## 再実行
+- [x] README / LICENSE / SECURITY.md / CONTRIBUTING.md
+- [x] test (pytest 34 件緑 / バグ注入 3 種で検出力確認済み)
+- [x] secret / PII / personal path / history (secret scan 0 件・個人識別子 regex で全履歴 0 件・陽性対照つき)
+- [x] dependency (標準ライブラリのみ。テストのみ pytest) / CI workflow (未導入)
+- [ ] operations / monitoring / rollback (内部運用ツールのため対象外)
+- [x] GitHub owner / author identity (org noreply 名義で commit)
 
-```bash
-python <repo-preflight>/run_preflight.py --repo . --intent push --human
-```
+## 人間目視
 
-整合性検査の宣言は [.repo-preflight-consistency.json](.repo-preflight-consistency.json)
-(shadow mode) にあります。
+- reviewer: (public 化前に記入)
+- reviewed_at:
+- exact HEAD / PR diff: `git log --oneline public-main` の全 commit
+- reviewed content: 公開対象 29 ファイルと全 commit 履歴
+- decision: (public 化の承認時に approve を記入)
+- 外から見えるfilesとcommit history: 29 ファイル / fresh history のみ (前身 repo の履歴は持ち込まない)
+- review済み: 機械検査一式 (repo-preflight push intent)
+- 未review: 人間による最終目視
+- 残余リスク: 独自形式・エンコード済み secret は機械検査の保証外 (repo-preflight の non_guarantees 準拠)
+- 次に承認する正確な操作: `gh repo edit nexus-ai-2045/cloud-autopilot --visibility public`
