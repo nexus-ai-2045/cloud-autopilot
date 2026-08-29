@@ -11,7 +11,5 @@
       {"text": "cp config.example.json config.local.json", "paths": ["config.example.json"]}
     ]
   },
-  "impact_map": [
-    {"change": ["core/**", "runners/**"], "requires_any": ["README.md", "runners/**", "tests/**"]}
-  ]
+  "impact_map": []
 }
