@@ -26,7 +26,8 @@ def colab_run(job, base_dir: Path, ident) -> int:
     """Colab 公式 CLI (google-colab-cli) 経由。
 
     制約 (一次情報 2026-08-25 確認):
-    - CLI は Windows 非対応 → Windows では WSL 経由で叩く
+    - CLI は macOS / Linux ネイティブ対応。Windows のみ非対応で WSL 経由が必要
+      → まずホストの `colab` を探し、無い時だけ WSL に落ちる
     - セットアップ未了なら明確なエラーで止まる (黙って成功したフリをしない)
     - 実行に使う Google アカウントは `colab auth` した名義。manifest の identity と
       一致しているかは人間がセットアップ時に確認する (CLI からは読めない)
@@ -34,9 +35,24 @@ def colab_run(job, base_dir: Path, ident) -> int:
     script = Path(base_dir) / job.entrypoint
     if script.is_dir():
         script = script / "main.py"
+
+    colab = shutil.which("colab")
+    if colab:  # macOS / Linux (または PATH に colab がある環境): 直接叩く
+        proc = subprocess.run(
+            [colab, "exec", str(script)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        print((proc.stdout or "") + (proc.stderr or ""))
+        return proc.returncode
+
     wsl = shutil.which("wsl")
     if not wsl:
-        print("[colab] WSL が無い。colab-cli は Windows 非対応のため実行不可", file=sys.stderr)
+        print(
+            "[colab] colab CLI が見つからない。"
+            "手順: `uv tool install google-colab-cli` → `colab auth` (ブラウザ承認が必要)。"
+            "Windows は CLI 非対応のため WSL 内でセットアップする",
+            file=sys.stderr,
+        )
         return 1
     # encoding 明示: WSL の UTF-8 出力を Windows のロケール (cp932 等) で decode すると化ける
     wsl_run = lambda args: subprocess.run(  # noqa: E731
