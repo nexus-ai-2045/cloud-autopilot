@@ -15,6 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .config import ConfigError, Identity, IdentityBook
+from .evaluator import ScoreError, invalidate_previous_result, read_score
 from .ledger import Ledger
 from .manifest import JobManifest, ManifestError
 
@@ -103,6 +104,8 @@ class Dispatcher:
             self.state.set(job.name, "running", runner_name)
             self.ledger.record_run(job.name, runner_name, job.identity, "started", account=run_ident.account)
             try:
+                # 再実行で残った前回成果物を、今回の exit 0 に紐づけない
+                invalidate_previous_result(manifest_path.parent, job.entrypoint)
                 code = fn(job, manifest_path.parent, run_ident)
             except Exception as e:  # runner 内の想定外は fallback に回す (握り潰さず記録)
                 self.ledger.record_run(
@@ -110,9 +113,23 @@ class Dispatcher:
                 )
                 continue
             if code == 0:
+                # 評価契約: score を読み、score_required なのに無い/壊れた完走は
+                # 「成功ログ付きの空振り」として完走扱いにしない (次の runner へ)
+                try:
+                    score = read_score(manifest_path.parent, job.entrypoint)
+                    score_problem = "score 無し" if (job.score_required and score is None) else ""
+                except ScoreError as e:
+                    score, score_problem = None, str(e)
+                if job.score_required and score_problem:
+                    self.ledger.record_run(
+                        job.name, runner_name, job.identity, "failed",
+                        f"score 契約違反: {score_problem}", account=run_ident.account,
+                    )
+                    continue
                 self.state.set(job.name, "finished", runner_name)
                 self.ledger.record_run(
-                    job.name, runner_name, job.identity, "finished", account=run_ident.account
+                    job.name, runner_name, job.identity, "finished",
+                    account=run_ident.account, score=score,
                 )
                 return "finished"
             self.ledger.record_run(

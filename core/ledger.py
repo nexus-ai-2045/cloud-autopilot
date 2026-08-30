@@ -36,7 +36,14 @@ class Ledger:
         return record
 
     def record_run(
-        self, job: str, runner: str, identity: str, event: str, detail: str = "", account: str = ""
+        self,
+        job: str,
+        runner: str,
+        identity: str,
+        event: str,
+        detail: str = "",
+        account: str = "",
+        score: float | None = None,
     ) -> dict:
         """event: started / finished / failed / rejected / checkpoint
 
@@ -44,17 +51,17 @@ class Ledger:
         両方残すことで「どの名義で本当に走ったか」を後から突合できる
         (data/ は gitignore 済みのローカル生成物。repo には入らない)。
         """
-        return self._append(
-            "runs.jsonl",
-            {
-                "job": job,
-                "runner": runner,
-                "identity": identity,
-                "account": account,
-                "event": event,
-                "detail": detail,
-            },
-        )
+        record = {
+            "job": job,
+            "runner": runner,
+            "identity": identity,
+            "account": account,
+            "event": event,
+            "detail": detail,
+        }
+        if score is not None:  # 評価契約 (core/evaluator.py) を宣言したジョブだけが持つ列
+            record["score"] = score
+        return self._append("runs.jsonl", record)
 
     def record_rate_limit(self, api: str, status: int, wait_seconds: float, attempt: int) -> dict:
         return self._append(

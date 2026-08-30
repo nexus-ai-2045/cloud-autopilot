@@ -101,7 +101,12 @@ def run_job(job: JobManifest, base_dir: Path, ident: Identity) -> int:
             # -o (--force): ローカルに古い同名ファイルがあっても必ずクラウド側の出力で上書きする
             # (fallback 実行が先に同じ output/ に書いた場合、スキップされると証跡が混ざる)
             print(call_with_backoff(lambda: _run(["kernels", "output", slug, "-p", str(outdir), "-o"]), api_name="kaggle:output", ledger=ledger))
-            ledger.record_run(job.name, "kaggle", job.identity, "finished", slug, account=ident.account)
+            # 終端の finished は dispatcher が score 検証後に書く。ここで finished を
+            # 書くと、score 契約違反でも台帳に完走記録が残る。
+            ledger.record_run(
+                job.name, "kaggle", job.identity, "checkpoint",
+                f"output collected {slug}", account=ident.account,
+            )
             return 0
         if "error" in status.lower() or "cancel" in status.lower():
             ledger.record_run(job.name, "kaggle", job.identity, "failed", status.strip()[:200], account=ident.account)
