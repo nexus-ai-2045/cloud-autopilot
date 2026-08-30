@@ -103,6 +103,7 @@ flowchart LR
 | `entrypoint` | manifest からの相対パスで実行対象。**kaggle では `main.py` を含む dir 指定が必須** (local は dir / ファイルどちらも可) |
 | `gpu` | GPU 割当を要求するか |
 | `fallback` | 失敗時の退避先。**`local` のみ指定可** (外部名義への自動振替は名義事故のもと) |
+| `score_required` | true なら評価契約が必須になる (下記「評価契約」) |
 | `notes` | 任意の自由記述メモ |
 
 - `jobs/queue/` に manifest を置くと `python autopilot.py queue` が順に実行する。
@@ -112,6 +113,16 @@ flowchart LR
 - `rejected` の理由は stderr に出るほか、`python autopilot.py status` でも確認できる
 - サンプル: [jobs/sim-smoke/](jobs/sim-smoke/) — シード固定の Schelling 分居モデル。
   同じシードなら Kaggle でもローカルでも同じ結果になる (再現性の実証)
+
+### 評価契約 (score)
+
+自動改善ループ (ラチェット・パラメータ探索) に乗せるジョブは、出力
+`<entrypoint>/output/sim_result.json` に**有限の数値 `score`** を書く。
+
+- manifest で `"score_required": true` を宣言したジョブは、score の無い完走・壊れた score を
+  **完走扱いにしない** (「成功ログ付きで何もしていない」空振りの機械検知 = 脅威モデル a)
+- score は台帳の finished 記録に残り、実験系列の比較に使う
+- score を返せないジョブは宣言しなければ自由に走れる (ループには乗らない)
 
 ## 名義の設計 (この repo の要)
 
@@ -175,16 +186,18 @@ config.example.json     名義設定のひな型 (→ config.local.json にコ�
 core/
   config.py             名義帳 (IdentityBook)。エイリアス解決と fail-closed 検証
   manifest.py           ジョブ manifest の構造検証
+  evaluator.py          評価契約 (score の読取と検証)
   api_client.py         429/5xx のみ retry するバックオフ
   ledger.py             台帳 (JSONL 追記)
-  dispatcher.py         キュー実行・自動再開・fallback
+  dispatcher.py         キュー実行・自動再開・fallback・score 検証
 runners/
   registry.py           runner 登録
   kaggle/               Kaggle kernel push→polling→出力回収
   colab/                Colab 公式 CLI (WSL) 経由
   local/                ローカル実行 (fallback 先)
 jobs/
-  sim-smoke/            サンプル: シード固定 Schelling モデル (kaggle + local fallback)
+  sim-smoke/            サンプル: シード固定 Schelling モデル (kaggle + local fallback, score 契約)
+  sim-suite/            メタ安全保障 4 シミュレーターの実走 (要: 製品 checkout + NPM_CMD)
   queue/                ここに manifest を置くとキューに乗る
 tests/                  pytest (ユニット + サンプルの再現性検証)
 ```

@@ -17,11 +17,11 @@
 
 ## 人間目視
 
-- reviewer: (public 化前に記入)
-- reviewed_at:
-- exact HEAD / PR diff: `git log --oneline public-main` の全 commit
-- reviewed content: 公開対象 29 ファイルと全 commit 履歴
-- decision: (public 化の承認時に approve を記入)
+- reviewer: CEO (repo owner)
+- reviewed_at: 2026-08-30
+- exact HEAD / PR diff: PR #1 / #2 / #3 をブラウザで確認のうえ merge。public 化は明示承認
+- reviewed content: 公開対象ファイル一式と fresh history 全 commit
+- decision: approve
 - 外から見えるfilesとcommit history: 29 ファイル / fresh history のみ (前身 repo の履歴は持ち込まない)
 - review済み: 機械検査一式 (repo-preflight push intent)
 - 未review: 人間による最終目視
