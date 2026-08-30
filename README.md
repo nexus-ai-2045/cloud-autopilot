@@ -121,7 +121,10 @@ flowchart LR
 
 - manifest で `"score_required": true` を宣言したジョブは、score の無い完走・壊れた score を
   **完走扱いにしない** (「成功ログ付きで何もしていない」空振りの機械検知 = 脅威モデル a)
-- score は台帳の finished 記録に残り、実験系列の比較に使う
+- 各 runner 呼び出しの前に前回の `sim_result.json` を破棄する。再実行で残った古い score を
+  今回の完走に流用しない
+- score は台帳の finished 記録に残り、実験系列の比較に使う。Kaggle runner 自身は出力回収を
+  `checkpoint` として記録し、完走判定は dispatcher の score 検証後に行う
 - score を返せないジョブは宣言しなければ自由に走れる (ループには乗らない)
 
 ## 名義の設計 (この repo の要)

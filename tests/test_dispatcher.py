@@ -208,3 +208,66 @@ def test_score_required_without_score_fails_closed(tmp_path):
 def test_score_optional_job_finishes_without_score(tmp_path):
     d, q = _scored_dispatcher(tmp_path, runner_writes_score=False, score_required=False)
     assert d.run_queue(q) == {"job-s": "finished"}
+
+
+def test_stale_score_from_prior_run_fails_closed(tmp_path):
+    """再実行で前回の sim_result.json が残っていても、今回の空振りを完走にしない。
+
+    終端 state を消してやり直す流れでは output/ は残る。新しい invocation が
+    exit 0 でも score を書かないなら、古い score を流用してはいけない。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    kernel = tmp_path / "kernel"
+    outdir = kernel / "output"
+    outdir.mkdir(parents=True)
+    (outdir / "sim_result.json").write_text(json.dumps({"score": 0.99}), encoding="utf-8")
+    (q / "job-s.json").write_text(
+        json.dumps(
+            {
+                "name": "job-s",
+                "runner": "local",
+                "identity": "local",
+                "entrypoint": "../kernel",
+                "score_required": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(job, base, ident):
+        return 0  # 今回は成果物を書かない
+
+    d = Dispatcher({"local": fake_runner}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-s": "failed"}
+    finished = [e for e in d.ledger.read("runs.jsonl") if e["event"] == "finished"]
+    assert finished == []
+
+
+def test_malformed_result_container_does_not_abort_queue(tmp_path):
+    """壊れた sim_result.json はジョブ失敗であり、run_queue 全体の例外ではない。"""
+    q = tmp_path / "queue"
+    q.mkdir()
+    kernel = tmp_path / "kernel"
+    kernel.mkdir()
+    (q / "job-s.json").write_text(
+        json.dumps(
+            {
+                "name": "job-s",
+                "runner": "local",
+                "identity": "local",
+                "entrypoint": "../kernel",
+                "score_required": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(job, base, ident):
+        outdir = kernel / "output"
+        outdir.mkdir(exist_ok=True)
+        (outdir / "sim_result.json").write_text("null", encoding="utf-8")
+        return 0
+
+    d = Dispatcher({"local": fake_runner}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-s": "failed"}

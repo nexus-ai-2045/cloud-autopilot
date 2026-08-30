@@ -26,11 +26,22 @@ def output_dir(base_dir: Path | str, entrypoint: str) -> Path:
     return d / "output"
 
 
+def invalidate_previous_result(base_dir: Path | str, entrypoint: str) -> None:
+    """今回の invocation に前回の sim_result.json を混ぜない。
+
+    終端 state を消して再実行すると output/ は残る。runner が exit 0 でも
+    新しい score を書かない場合、古いファイルを読むと空振りを完走にできる。
+    """
+    path = output_dir(base_dir, entrypoint) / RESULT_FILE
+    if path.is_file():
+        path.unlink()
+
+
 def read_score(base_dir: Path | str, entrypoint: str) -> float | None:
     """output/sim_result.json の score を返す。
 
     - ファイルまたは score キーが無い → None (契約を宣言していないジョブは自由)
-    - JSON 破損・非数値・NaN/inf → ScoreError (壊れた採点は「無し」と区別して止める)
+    - JSON 破損・非 object・非数値・NaN/inf → ScoreError (壊れた採点は「無し」と区別して止める)
     """
     path = output_dir(base_dir, entrypoint) / RESULT_FILE
     if not path.exists():
@@ -39,6 +50,8 @@ def read_score(base_dir: Path | str, entrypoint: str) -> float | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise ScoreError(f"{path} が JSON として読めない: {e}") from e
+    if not isinstance(data, dict):
+        raise ScoreError(f"{path} のトップレベルが object ではない: {type(data).__name__}")
     if "score" not in data:
         return None
     value = data["score"]

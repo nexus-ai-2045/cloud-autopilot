@@ -61,3 +61,17 @@ def test_read_score_broken_json_raises(tmp_path):
     (outdir / RESULT_FILE).write_text("{broken", encoding="utf-8")
     with pytest.raises(ScoreError):
         read_score(tmp_path, "kernel")
+
+
+@pytest.mark.parametrize("raw", ["null", "1", "[1]", "\"x\""])
+def test_read_score_rejects_non_object_container(tmp_path, raw):
+    """トップレベルが object 以外なら TypeError ではなく ScoreError。
+
+    dispatcher は ScoreError だけを契約違反として掴む。TypeError だと
+    キュー全体が止まる。
+    """
+    outdir = tmp_path / "kernel" / "output"
+    outdir.mkdir(parents=True)
+    (outdir / RESULT_FILE).write_text(raw, encoding="utf-8")
+    with pytest.raises(ScoreError):
+        read_score(tmp_path, "kernel")
