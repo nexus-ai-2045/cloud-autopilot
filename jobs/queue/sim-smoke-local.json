@@ -3,5 +3,6 @@
   "runner": "local",
   "identity": "local",
   "entrypoint": "../sim-smoke/kernel",
-  "notes": "自走ループ E2E 確認用。sim-smoke と同じシミュレーションをローカルで完結実行する"
+  "notes": "自走ループ E2E 確認用。sim-smoke と同じシミュレーションをローカルで完結実行する",
+  "score_required": true
 }

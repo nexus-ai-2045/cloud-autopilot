@@ -162,3 +162,49 @@ def test_local_runner_with_relative_base_dir(tmp_path, monkeypatch):
     )
     assert local_run(job, Path("j1"), None) == 0
     assert (jobdir / "output" / "local_run.log").exists()
+
+
+def _scored_dispatcher(tmp_path, runner_writes_score: bool, score_required: bool):
+    """score 契約テスト用: runner が output/sim_result.json を書く偽 runner を組む。"""
+    q = tmp_path / "queue"
+    q.mkdir(exist_ok=True)
+    kernel = tmp_path / "kernel"
+    kernel.mkdir(exist_ok=True)
+    manifest = {
+        "name": "job-s",
+        "runner": "local",
+        "identity": "local",
+        "entrypoint": "../kernel",
+    }
+    if score_required:
+        manifest["score_required"] = True
+    (q / "job-s.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def fake_runner(job, base, ident):
+        outdir = kernel / "output"
+        outdir.mkdir(exist_ok=True)
+        payload = {"score": 0.75} if runner_writes_score else {"steps": 3}
+        (outdir / "sim_result.json").write_text(json.dumps(payload), encoding="utf-8")
+        return 0
+
+    return Dispatcher({"local": fake_runner}, tmp_path, identities=BOOK), q
+
+
+def test_scored_job_records_score_in_ledger(tmp_path):
+    d, q = _scored_dispatcher(tmp_path, runner_writes_score=True, score_required=True)
+    assert d.run_queue(q) == {"job-s": "finished"}
+    finished = [e for e in d.ledger.read("runs.jsonl") if e["event"] == "finished"]
+    assert finished[-1]["score"] == 0.75
+
+
+def test_score_required_without_score_fails_closed(tmp_path):
+    """score_required なのに score が無い完走は「成功ログ付きの空振り」— 完走扱いにしない。"""
+    d, q = _scored_dispatcher(tmp_path, runner_writes_score=False, score_required=True)
+    assert d.run_queue(q) == {"job-s": "failed"}
+    events = d.ledger.read("runs.jsonl")
+    assert any("score" in e["detail"] for e in events if e["event"] == "failed")
+
+
+def test_score_optional_job_finishes_without_score(tmp_path):
+    d, q = _scored_dispatcher(tmp_path, runner_writes_score=False, score_required=False)
+    assert d.run_queue(q) == {"job-s": "finished"}
