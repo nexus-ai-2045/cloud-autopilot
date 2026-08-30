@@ -96,6 +96,103 @@ def test_unresolvable_identity_rejected_before_run(tmp_path):
     assert events and events[-1]["event"] == "rejected"
 
 
+def test_rejected_is_not_terminal_and_recovers_after_config_fix(tmp_path):
+    """rejected は終端ではない。config を直したら次回実行で自動的に再検証されて走る。
+
+    過去バグ: rejected が TERMINAL に入っていたため、「config に実名を記入せよ」と
+    言われて直しても、state 削除の手術をしない限り永久にスキップされた。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-r", runner="kaggle")
+
+    broken = IdentityBook.from_dict(
+        {"identities": {"local": {"runner": "local", "account": "local"}}}
+    )  # kaggle-main 未登録 = 設定不備
+    d1 = Dispatcher({"kaggle": lambda j, b, i: 0}, tmp_path, identities=broken)
+    assert d1.run_queue(q) == {"job-r": "rejected"}
+
+    # config を直した (= 正しい名義帳で再実行)
+    d2 = Dispatcher({"kaggle": lambda j, b, i: 0}, tmp_path, identities=BOOK)
+    assert d2.run_queue(q) == {"job-r": "finished"}
+    assert d2.state.get("job-r") == "finished"
+
+
+def test_duplicate_job_name_in_queue_rejected(tmp_path):
+    """同じ name を宣言する 2 つ目のファイルは rejected。1 つ目の実行と state は守られる。
+
+    過去バグ: state が name キーのため、2 つ目のファイルが 1 つ目の終端状態を
+    借りて黙ってスキップされた (dict 上は "finished" に見える)。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-dup")  # job-dup.json
+    (q / "zz-other-file.json").write_text(
+        json.dumps({"name": "job-dup", "runner": "local", "identity": "local", "entrypoint": "kernel"}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def counting_local(job, base, ident):
+        calls.append(base)
+        return 0
+
+    d = Dispatcher({"local": counting_local}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-dup": "finished", "zz-other-file": "rejected"}
+    assert len(calls) == 1  # 実行は 1 回だけ
+    assert d.state.get("job-dup") == "finished"  # 重複側が state を汚さない
+    rejected = [e for e in d.ledger.read("runs.jsonl") if e["event"] == "rejected"]
+    assert rejected and "重複" in rejected[-1]["detail"]
+
+
+def test_finished_not_clobbered_by_manifest_breakage_and_no_silent_rerun(tmp_path):
+    """finished 済みジョブの manifest が一時的に壊れても、終端 state を壊さない。
+
+    過去バグ (レビュー Workflow 検出): ManifestError 分岐が終端チェックより前に
+    state.set(stem, "rejected") を無条件で書くため、stem == name の規約下で
+    finished→rejected に上書きされ、rejected 非終端化後は manifest 修復だけで
+    state 削除なしにジョブが黙って再実行された (kaggle なら GPU 枠を再消費)。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    good = json.dumps(
+        {"name": "job-x", "runner": "local", "identity": "local", "entrypoint": "kernel"}
+    )
+    (q / "job-x.json").write_text(good, encoding="utf-8")
+    calls = []
+
+    def counting_local(job, base, ident):
+        calls.append(job.name)
+        return 0
+
+    d = Dispatcher({"local": counting_local}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-x": "finished"}
+
+    (q / "job-x.json").write_text("{broken", encoding="utf-8")  # 編集ミスを再現
+    d2 = Dispatcher({"local": counting_local}, tmp_path, identities=BOOK)
+    assert d2.run_queue(q) == {"job-x": "rejected"}
+    assert d2.state.get("job-x") == "finished"  # 終端 state は守られる
+
+    (q / "job-x.json").write_text(good, encoding="utf-8")  # 修復
+    d3 = Dispatcher({"local": counting_local}, tmp_path, identities=BOOK)
+    assert d3.run_queue(q) == {"job-x": "finished"}
+    assert calls == ["job-x"]  # 再実行しない (やり直しは state 削除で明示的に)
+
+
+def test_broken_json_manifest_does_not_abort_queue(tmp_path):
+    """JSON として読めない manifest はそのジョブの rejected。後続ジョブは走る。
+
+    過去バグ: JobManifest.load が JSONDecodeError を素通ししていたため、
+    壊れた 1 ファイルで run_queue 全体が例外で落ちた。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    (q / "aa-broken.json").write_text("{not json", encoding="utf-8")
+    _write_job(q, "job-ok")
+    d = Dispatcher({"local": lambda j, b, i: 0}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"aa-broken": "rejected", "job-ok": "finished"}
+
+
 def test_all_runners_exhausted(tmp_path):
     q = tmp_path / "queue"
     q.mkdir()

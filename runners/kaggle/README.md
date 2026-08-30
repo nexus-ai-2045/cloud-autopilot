@@ -4,7 +4,7 @@
 
 ## 前提 (各自のローカル設定)
 
-1. Kaggle アカウント (GPU 利用には電話番号認証が必要)
+1. Kaggle アカウント (GPU 利用の認証要件は root README「実行環境と無料枠」の表が正本)
 2. API トークン: Kaggle の Settings → API → Create New Token → `~/.kaggle/kaggle.json` に配置
 3. `pip install kaggle`
 4. `config.local.json` にエイリアス `kaggle-main` として自分のユーザー名を登録
@@ -17,8 +17,9 @@
 3. 30 秒間隔で完走を polling (上限 20 分)
 4. 完走したら `kernels output` で成果物を `<entrypoint>/output/` に回収し、台帳に記録
 
-## 制約 (2026-08 時点の無料枠)
+## 制約
 
-- GPU 週 30 時間 (T4×2 / P100)、1 セッション最大 12 時間
-- 規約上 1 人 1 アカウント。複数アカウントでの枠増殖はしない
-- 429/5xx は共通バックオフ (5s→60s、最大 3 回) で再試行し、台帳に記録する
+- 無料枠の数値 (GPU 時間・セッション上限・アカウント規約) は
+  root README「実行環境と無料枠」の表が正本 (ここに再掲しない)
+- 429/5xx は共通バックオフで再試行し、台帳に記録する
+  (具体値は `core/api_client.py` 冒頭の定数が正本)

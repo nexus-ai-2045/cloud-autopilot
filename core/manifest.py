@@ -57,4 +57,13 @@ class JobManifest:
 
     @classmethod
     def load(cls, path: Path | str) -> "JobManifest":
-        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+        path = Path(path)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            # ManifestError に正規化: 壊れた 1 ファイルはそのジョブの rejected であって、
+            # キュー全体を止める例外ではない (dispatcher は ManifestError だけを拾う)
+            raise ManifestError(f"{path.name} が JSON として読めない: {e}") from e
+        if not isinstance(raw, dict):
+            raise ManifestError(f"{path.name} のトップレベルが object ではない: {type(raw).__name__}")
+        return cls.from_dict(raw)

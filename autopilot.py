@@ -42,7 +42,7 @@ def cmd_queue() -> int:
 
 
 def cmd_run(manifest: str) -> int:
-    result = _dispatcher()._run_one(Path(manifest))
+    result = _dispatcher().run_one(Path(manifest))
     print(result)
     return 0 if result == "finished" else 1
 
