@@ -78,3 +78,7 @@ def test_kaggle_adapter_honors_dispatcher_contract(tmp_path, monkeypatch):
 
     output = next(c for c in calls if c[:2] == ["kernels", "output"])
     assert "-o" in output  # 古いローカルコピーでスキップさせない (--force)
+
+    events = Ledger(tmp_path).read("runs.jsonl")
+    assert any(e["event"] == "checkpoint" for e in events)
+    assert not any(e["event"] == "finished" for e in events)

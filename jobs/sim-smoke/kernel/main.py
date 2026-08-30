@@ -77,6 +77,9 @@ def run_simulation() -> dict:
         "steps": steps,
         "unhappy_remaining": len(unhappy_cells(grid)),
         "segregation_index": round(segregation, 4),
+        # 評価契約 (core/evaluator.py): ループに乗るジョブは有限数値 score を返す。
+        # この smoke では分居度そのものを score にする
+        "score": round(segregation, 4),
     }
 
 

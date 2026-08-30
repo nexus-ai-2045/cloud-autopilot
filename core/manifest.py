@@ -29,6 +29,8 @@ class JobManifest:
     notes: str = ""
     # fallback は名義の取り違えを避けるため local のみ許可 (外部名義を持たない)
     fallback: tuple = ()
+    # 評価契約: true なら output/sim_result.json に有限数値 score が必須 (core/evaluator.py)
+    score_required: bool = False
 
     @classmethod
     def from_dict(cls, raw: dict) -> "JobManifest":
@@ -50,6 +52,7 @@ class JobManifest:
             gpu=bool(raw.get("gpu", False)),
             notes=raw.get("notes", ""),
             fallback=fallback,
+            score_required=bool(raw.get("score_required", False)),
         )
 
     @classmethod
