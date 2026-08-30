@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.config import ConfigError, IdentityBook
+from core.config import ConfigError, IdentityBook, _load_placeholder_accounts
 
 
 def _book(**identities) -> IdentityBook:
@@ -61,6 +61,16 @@ def test_resolve_placeholder_account_rejected():
         book.resolve("kaggle-main", "kaggle")
 
 
+def test_resolve_account_containing_placeholder_mark_is_accepted():
+    """placeholder 判定は example の値との完全一致。'your-' を含むだけの実名を誤拒否しない。
+
+    過去バグ: 部分文字列判定 ('your-' in account) だったため、
+    'your-name-lab' のような実在アカウント名が実行前に誤って拒否された。
+    """
+    book = _book(**{"kaggle-main": {"runner": "kaggle", "account": "your-name-lab"}})
+    assert book.resolve("kaggle-main", "kaggle").account == "your-name-lab"
+
+
 def test_resolve_local_is_exempt_from_placeholder_check():
     book = _book(local={"runner": "local", "account": "local"})
     assert book.resolve("local", "local").account == "local"
@@ -74,6 +84,38 @@ def test_from_dict_requires_identities_section():
 def test_from_dict_requires_runner_and_account():
     with pytest.raises(ConfigError, match="runner / account"):
         IdentityBook.from_dict({"identities": {"x": {"runner": "kaggle"}}})
+
+
+def test_placeholder_source_degrades_to_none_not_empty_set(tmp_path):
+    """example の構造がずれても placeholder 検知を黙って無効化しない (fail-open 防止)。
+
+    過去バグ (レビュー Workflow 検出): example が有効な JSON のまま identities が
+    改名・空・非 dict になると空集合が「正」として返り、予備判定が一切発動せず
+    プレースホルダ検知そのものが消えていた。None を返せば呼び手が予備判定に落ちる。
+    """
+    p = tmp_path / "example.json"
+    p.write_text(json.dumps({"accounts": {}}), encoding="utf-8")  # キー改名
+    assert _load_placeholder_accounts(p) is None
+    p.write_text(json.dumps({"identities": []}), encoding="utf-8")  # 非 dict
+    assert _load_placeholder_accounts(p) is None
+    p.write_text(json.dumps({"identities": {"local": {"runner": "local", "account": "local"}}}), encoding="utf-8")
+    assert _load_placeholder_accounts(p) is None  # non-local ゼロ = 空集合を正としない
+    p.write_text("{broken", encoding="utf-8")
+    assert _load_placeholder_accounts(p) is None
+    p.write_text(
+        json.dumps({"identities": {"k": {"runner": "kaggle", "account": "your-x"}}}), encoding="utf-8"
+    )
+    assert _load_placeholder_accounts(p) == frozenset({"your-x"})  # 正常系
+
+
+def test_placeholder_fallback_marks_used_when_example_unavailable(monkeypatch):
+    """example が使えない時は予備の部分一致判定に落ちる (検知ゼロにしない)。"""
+    import core.config as config
+
+    monkeypatch.setattr(config, "_placeholder_accounts", lambda: None)
+    book = _book(**{"kaggle-main": {"runner": "kaggle", "account": "your-anything"}})
+    with pytest.raises(ConfigError, match="プレースホルダ"):
+        book.resolve("kaggle-main", "kaggle")
 
 
 def test_example_config_is_loadable_but_not_runnable():

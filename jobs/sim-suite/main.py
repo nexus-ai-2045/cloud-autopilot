@@ -207,8 +207,14 @@ def main() -> int:
             "deterministic": True,
         }
     contract = validate_with_studio_schema(bundle_paths)
-    print(json.dumps({"products": summary, "contract_validation": contract},
-                     ensure_ascii=False))
+    result = {"products": summary, "contract_validation": contract,
+              # 評価契約 (core/evaluator.py): 決定論確認まで通った bundle 数を score にする。
+              # 1 つでも欠ければここに到達しない (途中 raise) ため、空振りは score 無しで落ちる
+              "score": float(len(bundle_paths))}
+    (workdir / "sim_result.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 

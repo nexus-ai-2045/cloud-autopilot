@@ -3,6 +3,7 @@
 jobs/queue/ に置かれた manifest を順に実行する。
 - 実行前に名義エイリアスを config.local.json で解決する。解決できないジョブは走らせない
 - 実行状態は data/queue_state.json に永続化し、再起動しても続きから走る (自動再開)
+- rejected は終端ではない: 設定を直せば次回の実行で自動的に再検証される
 - runner が一時障害で落ちたら、manifest の fallback runner (local のみ) に回す
 - すべての遷移は Ledger に記録する (黙って止まらない)
 """
@@ -21,8 +22,10 @@ from .manifest import JobManifest, ManifestError
 
 STATE_FILE = "queue_state.json"
 
-# ジョブの終端状態。ここに入ったジョブは再実行しない (再実行は state を消して明示的に)
-TERMINAL = {"finished", "failed", "rejected"}
+# ジョブの終端状態。ここに入ったジョブは再実行しない (再実行は state を消して明示的に)。
+# rejected は入れない: 設定不備 (未登録名義・プレースホルダ等) は config.local.json を
+# 直せば解消する回復可能な状態で、終端化すると「直したのに走らない」行き止まりになる
+TERMINAL = {"finished", "failed"}
 
 # fallback で local に回るときの名義。外部アカウントを持たない固定値
 LOCAL_IDENTITY = Identity(alias="local", runner="local", account="local")
@@ -66,19 +69,44 @@ class Dispatcher:
         self.identities = identities
 
     def run_queue(self, queue_dir: Path) -> dict[str, str]:
-        """queue_dir の *.json を名前順に処理し、{job名: 終了状態} を返す。"""
+        """queue_dir の *.json をファイル名順に処理し、{ファイル名 stem: 終了状態} を返す。
+
+        state は manifest の name をキーに持つため、別ファイルが同じ name を宣言すると
+        先に走ったジョブの終端状態を借りて黙ってスキップされてしまう。それを防ぐため、
+        同一 name の 2 件目以降はここで rejected にする (state には触らない —
+        正当な 1 件目の記録を重複側が上書きしないため)。
+        """
         results: dict[str, str] = {}
+        claimed: dict[str, Path] = {}  # name -> 最初にその name を宣言したファイル
         for path in sorted(Path(queue_dir).glob("*.json")):
-            results[path.stem] = self._run_one(path)
+            try:
+                name = JobManifest.load(path).name
+            except ManifestError:
+                results[path.stem] = self.run_one(path)  # 拒否の記録は run_one に一元化
+                continue
+            first = claimed.get(name)
+            if first is not None:
+                msg = f"ジョブ名 '{name}' が {first.name} と重複。名前を変えるかファイルを統合する"
+                print(f"[rejected] {path.stem}: {msg}", file=sys.stderr)
+                self.ledger.record_run(name, "-", "-", "rejected", msg)
+                results[path.stem] = "rejected"
+                continue
+            claimed[name] = path
+            results[path.stem] = self.run_one(path)
         return results
 
-    def _run_one(self, manifest_path: Path) -> str:
+    def run_one(self, manifest_path: Path) -> str:
         try:
             job = JobManifest.load(manifest_path)
         except ManifestError as e:
             print(f"[rejected] {manifest_path.stem}: {e}", file=sys.stderr)
             self.ledger.record_run(manifest_path.stem, "-", "-", "rejected", str(e))
-            self.state.set(manifest_path.stem, "rejected", str(e))
+            # name が読めないので stem で記録する (status 表示用)。ただし終端 state は
+            # 上書きしない: stem == name の規約下で finished 済みジョブの manifest を
+            # 一時的に壊すと、rejected 上書き→修復後に「state 削除なしの黙った再実行」が
+            # 起きてしまう (終端のやり直しは state 削除で明示的に、の不変条件を守る)
+            if self.state.get(manifest_path.stem) not in TERMINAL:
+                self.state.set(manifest_path.stem, "rejected", str(e))
             return "rejected"
 
         # 終端チェックは名義解決より先 (後からの設定エラーで finished を上書きしない)

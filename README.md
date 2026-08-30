@@ -69,14 +69,14 @@ flowchart LR
         D --> L[(台帳 JSONL<br/>runs / rate_limit)]
     end
     subgraph runners
-        K[kaggle<br/>GPU 週30h]
+        K[kaggle<br/>定常 GPU 枠]
         CO[colab<br/>単発 GPU]
         LO[local<br/>fallback]
     end
     J --> M
     C1 --> R
     D --> K & CO & LO
-    K --> A[api_client<br/>429/5xx のみ retry<br/>5s→60s ×2 最大3回]
+    K --> A[api_client<br/>429/5xx のみ retry<br/>バックオフ付き]
     A --> L
 ```
 
@@ -107,10 +107,13 @@ flowchart LR
 | `notes` | 任意の自由記述メモ |
 
 - `jobs/queue/` に manifest を置くと `python autopilot.py queue` が順に実行する。
-  終端状態 (`finished` / `failed` / `rejected`) のジョブはスキップされる
+  終端状態 (`finished` / `failed`) のジョブはスキップされる
   (= 中断しても再実行で続きから走る)。終端ジョブをやり直すには `data/queue_state.json` の
   該当エントリを消して明示的に再実行する
-- `rejected` の理由は stderr に出るほか、`python autopilot.py status` でも確認できる
+- `rejected` (manifest 不備・名義未解決) は**終端ではない**。設定を直せば次回の実行で
+  自動的に再検証される。理由は stderr に出るほか、`python autopilot.py status` でも確認できる
+- 同じ `name` を宣言する manifest が queue に 2 つ以上あると、2 件目以降は rejected になる
+  (state が name キーのため、黙って先行ジョブの終端状態を借りてスキップされる事故を防ぐ)
 - サンプル: [jobs/sim-smoke/](jobs/sim-smoke/) — シード固定の Schelling 分居モデル。
   同じシードなら Kaggle でもローカルでも同じ結果になる (再現性の実証)
 
@@ -153,8 +156,9 @@ Google Cloud (Cloud Run / GCE 等) は runner の拡張先。追加時に adapte
 
 ## レート制限の扱い
 
-- 再試行してよいのは HTTP **429 / 500 / 502 / 503 / 504 のみ**
-- バックオフ: 初期 5 秒・最大 60 秒・倍率 2・最大 3 回
+- 再試行してよいのは HTTP **429 と特定の 5xx のみ**。対象ステータスの正確な集合とバックオフの具体値
+  (初期待ち・上限・倍率・回数) は [`core/api_client.py`](core/api_client.py) 冒頭の定数が正本
+  (数値をここに再掲しない — 2 箇所更新の食い違いを作らないため)
 - それ以外のエラーは再試行しない (原因が消えていないのに繰り返さない)
 - 発生はすべて `data/rate_limit.jsonl` に記録 — 「体感はあるが実測がない」を無くす
 - 現状この経路を通るのは kaggle runner (CLI 呼び出し) のみ。colab / local は外部 API を
@@ -174,9 +178,8 @@ Google Cloud (Cloud Run / GCE 等) は runner の拡張先。追加時に adapte
 
 - 新たに課金が発生しうる操作 (有料 GPU の起動・予算を増やす設定変更) は自動実行しない。
   都度人間承認のうえで使う。GitHub Actions には課金しない
-- Kaggle は規約上 1 人 1 アカウント。複数アカウントでの枠増殖はしない
-- Kaggle GPU は週 30h・電話番号認証が前提 / Colab はリソース非保証・常駐不可 /
-  Colab CLI は Windows 非対応 (WSL 経由)
+- 複数アカウントでの枠増殖はしない (各環境の規約・無料枠の数値は
+  「実行環境と無料枠」の表が正本。ここに再掲しない)
 - バックオフが効くのは kaggle 経路のみ (詳細は「レート制限の扱い」)
 - `config.local.json` / `data/` / `jobs/**/output/` を commit しない (gitignore 済)
 - main への push は PR 経由
@@ -196,7 +199,7 @@ core/
 runners/
   registry.py           runner 登録
   kaggle/               Kaggle kernel push→polling→出力回収
-  colab/                Colab 公式 CLI (WSL) 経由
+  colab/                Colab 公式 CLI 経由 (Windows のみ WSL fallback)
   local/                ローカル実行 (fallback 先)
 jobs/
   sim-smoke/            サンプル: シード固定 Schelling モデル (kaggle + local fallback, score 契約)

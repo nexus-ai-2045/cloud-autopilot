@@ -3,5 +3,6 @@
   "runner": "local",
   "identity": "local",
   "entrypoint": "../sim-suite",
-  "notes": "メタ安全保障4シミュレーターを2回ずつ実走して決定論を確認し、studio-run-bundle (live-command) を生成する。外部API・GPU不要"
+  "notes": "メタ安全保障4シミュレーターを2回ずつ実走して決定論を確認し、studio-run-bundle (live-command) を生成する。外部API・GPU不要。評価契約あり (score の意味は jobs/sim-suite/main.py が正本)",
+  "score_required": true
 }
