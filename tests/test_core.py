@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -39,6 +40,40 @@ def test_manifest_fallback_local_only():
         JobManifest.from_dict(
             {"name": "j", "runner": "kaggle", "identity": "kaggle-main", "entrypoint": "k", "fallback": ["colab"]}
         )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"name": 5, "runner": "local", "identity": "local", "entrypoint": "k"},
+        {"name": "j", "runner": ["local"], "identity": "local", "entrypoint": "k"},
+        {"name": "j", "runner": "local", "identity": 1, "entrypoint": "k"},
+        {"name": "j", "runner": "local", "identity": "local", "entrypoint": "k", "fallback": 5},
+        {"name": "j", "runner": "local", "identity": "local", "entrypoint": "k", "fallback": [1]},
+        {"name": "j", "runner": "local", "identity": "local", "entrypoint": "k", "gpu": "yes"},
+        {"name": "j", "runner": "local", "identity": "local", "entrypoint": "k", "score_required": 1},
+    ],
+)
+def test_manifest_rejects_wrong_types_as_manifest_error(raw):
+    """型違いは TypeError (キュー全体が落ちる) ではなく ManifestError (そのジョブだけ rejected)。"""
+    with pytest.raises(ManifestError):
+        JobManifest.from_dict(raw)
+
+
+def test_manifest_load_utf16_file_is_manifest_error(tmp_path):
+    """PowerShell 5.1 の Out-File 既定 (UTF-16LE) で保存された manifest で
+    UnicodeDecodeError がキュー全体を落とさない。"""
+    p = tmp_path / "j.json"
+    p.write_text(
+        json.dumps({"name": "j", "runner": "local", "identity": "local", "entrypoint": "k"}), encoding="utf-16"
+    )
+    with pytest.raises(ManifestError, match="読めない"):
+        JobManifest.load(p)
+
+
+def test_manifest_load_missing_file_is_manifest_error(tmp_path):
+    with pytest.raises(ManifestError, match="読めない"):
+        JobManifest.load(tmp_path / "nope.json")
 
 
 def test_backoff_schedule():

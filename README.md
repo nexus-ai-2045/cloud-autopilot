@@ -51,6 +51,8 @@ python autopilot.py run jobs/sim-smoke/job.json
 # 状態確認 / テスト
 python autopilot.py status
 python -m pytest tests/ -q
+#   Windows で tmp 権限エラーが出る場合:
+#   python -m pytest tests -q -p no:cacheprovider --basetemp=./.pytest-tmp
 ```
 
 設定が無い・不備がある場合は**黙って動かず、何が足りないかを言って停止する** (fail-closed)。
@@ -66,7 +68,8 @@ flowchart LR
     subgraph core
         M[manifest 構造検証] --> R[IdentityBook<br/>名義解決<br/>未登録/取り違えは拒否]
         R --> D[dispatcher<br/>キュー/自動再開/fallback]
-        D --> L[(台帳 JSONL<br/>runs / rate_limit)]
+        D --> E[evaluator<br/>score 検証]
+        E --> L[(台帳 JSONL<br/>runs / rate_limit)]
     end
     subgraph runners
         K[kaggle<br/>定常 GPU 枠]
@@ -114,6 +117,9 @@ flowchart LR
   自動的に再検証される。理由は stderr に出るほか、`python autopilot.py status` でも確認できる
 - 同じ `name` を宣言する manifest が queue に 2 つ以上あると、2 件目以降は rejected になる
   (state が name キーのため、黙って先行ジョブの終端状態を借りてスキップされる事故を防ぐ)
+- 同梱 queue には clean clone + `config.local.json` だけで走るジョブしか置かない
+  ([ADR-0001](docs/adr/0001-queue-bundled-jobs-must-be-environment-independent.md))。外部 checkout や
+  外部 CLI が要るジョブは `jobs/<name>/job.json` に置き、`python autopilot.py run jobs/<name>/job.json` で明示実行する
 - サンプル: [jobs/sim-smoke/](jobs/sim-smoke/) — シード固定の Schelling 分居モデル。
   同じシードなら Kaggle でもローカルでも同じ結果になる (再現性の実証)
 
@@ -128,6 +134,8 @@ flowchart LR
   今回の完走に流用しない
 - score は台帳の finished 記録に残り、実験系列の比較に使う。Kaggle runner 自身は出力回収を
   `checkpoint` として記録し、完走判定は dispatcher の score 検証後に行う
+- colab runner は成果物を回収しないため、colab ジョブに `score_required` を付けると常に契約違反で止まる
+  (意図した fail-closed。[ADR-0002](docs/adr/0002-colab-runner-scope.md))
 - score を返せないジョブは宣言しなければ自由に走れる (ループには乗らない)
 
 ## 名義の設計 (この repo の要)
@@ -145,8 +153,8 @@ flowchart LR
 
 | 環境 | 無料枠 | 向き | 制約 |
 |---|---|---|---|
-| Kaggle | GPU 週 30h (T4×2 / P100)、1 セッション 12h | 決まった学習・長時間ジョブ | GPU に電話番号認証。規約上 1 人 1 アカウント |
-| Colab | リソース保証なし、最長 12h | 対話実験・単発 GPU | 常駐・定期実行に不向き。CLI は Windows 非対応 (WSL 経由) |
+| Kaggle | GPU 週 30h (T4×2 / P100)、1 セッション 12h | 決まった学習・長時間ジョブ | GPU に電話番号認証。規約上 1 人 1 アカウント。polling 上限 (`runners/kaggle/run.py` の `POLL_TIMEOUT`) を超えると failed → fallback |
+| Colab | リソース保証なし、最長 12h | 対話実験・単発 GPU | 常駐・定期実行に不向き。CLI は Windows 非対応 (WSL 経由)。**成果物を回収しない** (exit code のみ) ため `score_required` 非対応 ([ADR-0002](docs/adr/0002-colab-runner-scope.md)) |
 | ローカル | 制限なし | 混雑時の退避先・機密データ | マシン性能に依存 |
 
 詳細は各 `runners/*/README.md`。
@@ -203,7 +211,8 @@ runners/
   local/                ローカル実行 (fallback 先)
 jobs/
   sim-smoke/            サンプル: シード固定 Schelling モデル (kaggle + local fallback, score 契約)
-  sim-suite/            メタ安全保障 4 シミュレーターの実走 (要: 製品 checkout + NPM_CMD)
+  sim-suite/            メタ安全保障 4 シミュレーターの実走 (queue 非同梱。run で明示実行。要: 製品 checkout + NPM_CMD)
   queue/                ここに manifest を置くとキューに乗る
-tests/                  pytest (ユニット + サンプルの再現性検証)
+docs/adr/               設計判断の記録 (ADR)
+tests/                  pytest (ユニット + 統合 + CLI E2E + サンプルの再現性検証)
 ```

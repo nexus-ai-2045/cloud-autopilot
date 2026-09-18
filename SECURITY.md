@@ -17,5 +17,6 @@ GitHub Security Advisories の非公開脆弱性報告を利用してくださ�
 - Kaggle API トークンは `~/.kaggle/kaggle.json` にのみ置く
 - 実行台帳 (`data/`) とジョブ出力 (`jobs/**/output/`) には名義や API レスポンスが
   含まれうるため commit しない (gitignore 済)
+- `jobs/**/kernel-metadata.json` は kaggle runner が実行時に生成し、実アカウント名を含む (gitignore 済)
 
 これらのファイルを含む変更を PR に含めないでください。

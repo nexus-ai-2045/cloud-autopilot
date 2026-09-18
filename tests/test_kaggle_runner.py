@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import Identity
@@ -82,3 +84,75 @@ def test_kaggle_adapter_honors_dispatcher_contract(tmp_path, monkeypatch):
     events = Ledger(tmp_path).read("runs.jsonl")
     assert any(e["event"] == "checkpoint" for e in events)
     assert not any(e["event"] == "finished" for e in events)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ('some-error-lab/my-cancel-job has status "KernelWorkerStatus.RUNNING"', "RUNNING"),
+        ('x/y has status "KernelWorkerStatus.COMPLETE"', "COMPLETE"),
+        ('x/y has status "KernelWorkerStatus.ERROR"', "ERROR"),
+        ('x/y has status "KernelWorkerStatus.CANCEL_REQUESTED"', "CANCEL_REQUESTED"),
+        ("garbage without token", None),
+    ],
+)
+def test_parse_kernel_status_ignores_words_inside_slug(text, expected):
+    """過去バグ: 行全体への部分一致で、slug に error/cancel/complete を含むと誤判定していた。"""
+    from runners.kaggle.run import parse_kernel_status
+
+    assert parse_kernel_status(text) == expected
+
+
+def test_kaggle_adapter_does_not_duplicate_started_event(tmp_path, monkeypatch):
+    """started は dispatcher が記録する。runner 側は checkpoint のみ (二重記録防止)。"""
+    import runners.kaggle.run as kr
+    from runners.registry import kaggle_run
+
+    kernel_dir = tmp_path / "kernels" / "k1"
+    kernel_dir.mkdir(parents=True)
+    (kernel_dir / "main.py").write_text("print('x')", encoding="utf-8")
+    (tmp_path / "queue").mkdir()
+    job = JobManifest.from_dict(
+        {"name": "j2", "runner": "kaggle", "identity": "kaggle-main", "entrypoint": "../kernels/k1"}
+    )
+
+    def fake_cli(args):
+        if args[:2] == ["kernels", "status"]:
+            return 'has status "KernelWorkerStatus.COMPLETE"'
+        return "ok"
+
+    monkeypatch.setattr(kr, "_run", fake_cli)
+    ledger = Ledger(tmp_path)
+    monkeypatch.setattr(kr, "Ledger", lambda: ledger)
+    assert kaggle_run(job, tmp_path / "queue", Identity("kaggle-main", "kaggle", "u")) == 0
+    events = [e["event"] for e in ledger.read("runs.jsonl")]
+    assert "started" not in events
+    assert "checkpoint" in events
+
+
+def test_running_kernel_with_error_in_slug_is_not_failed(tmp_path, monkeypatch):
+    """polling ループが slug 中の語で誤判定しない (純粋関数だけでなく使われ方を固定する)。
+
+    過去バグ: RUNNING 中でも slug に "error" があると行全体の部分一致で failed 扱いになった。
+    """
+    import runners.kaggle.run as kr
+    from runners.registry import kaggle_run
+
+    kernel_dir = tmp_path / "kernels" / "k1"
+    kernel_dir.mkdir(parents=True)
+    (kernel_dir / "main.py").write_text("print('x')", encoding="utf-8")
+    (tmp_path / "queue").mkdir()
+    job = JobManifest.from_dict(
+        {"name": "error-lab-job", "runner": "kaggle", "identity": "kaggle-main", "entrypoint": "../kernels/k1"}
+    )
+    statuses = iter(["RUNNING", "COMPLETE"])
+
+    def fake_cli(args):
+        if args[:2] == ["kernels", "status"]:
+            return f'some-error-lab/error-lab-job has status "KernelWorkerStatus.{next(statuses)}"'
+        return "ok"
+
+    monkeypatch.setattr(kr, "_run", fake_cli)
+    monkeypatch.setattr(kr, "Ledger", lambda: Ledger(tmp_path))
+    monkeypatch.setattr(kr.time, "sleep", lambda _: None)
+    assert kaggle_run(job, tmp_path / "queue", Identity("kaggle-main", "kaggle", "u")) == 0
