@@ -111,8 +111,9 @@ flowchart LR
 
 - `jobs/queue/` に manifest を置くと `python autopilot.py queue` が順に実行する。
   終端状態 (`finished` / `failed`) のジョブはスキップされる
-  (= 中断しても再実行で続きから走る)。終端ジョブをやり直すには `data/queue_state.json` の
-  該当エントリを消して明示的に再実行する
+  (= 中断しても再実行で続きから走る)。スキップした時は stderr に `[skipped]` と理由を出す。
+  終端ジョブをやり直すには `python autopilot.py run <manifest> --rerun` で明示的に再実行する
+  (終端 state を消して走らせ直し、台帳に `rerun_requested` を残す)
 - `rejected` (manifest 不備・名義未解決) は**終端ではない**。設定を直せば次回の実行で
   自動的に再検証される。理由は stderr に出るほか、`python autopilot.py status` でも確認できる
 - 同じ `name` を宣言する manifest が queue に 2 つ以上あると、2 件目以降は rejected になる
