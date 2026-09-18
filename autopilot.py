@@ -2,7 +2,8 @@
 
 使い方:
     python autopilot.py queue              # jobs/queue/*.json を順に実行 (自動再開つき)
-    python autopilot.py run <manifest>     # 単発ジョブ実行
+    python autopilot.py run <manifest>     # 単発ジョブ実行 (終端済みは [skipped] と表示して実行しない)
+    python autopilot.py run <manifest> --rerun   # 終端 state を明示的に消してやり直す
     python autopilot.py status             # 台帳とキュー状態の要約
 
 事前準備 (初回のみ):
@@ -41,8 +42,8 @@ def cmd_queue() -> int:
     return 0 if all(v in ("finished",) for v in results.values()) or not results else 1
 
 
-def cmd_run(manifest: str) -> int:
-    result = _dispatcher().run_one(Path(manifest))
+def cmd_run(manifest: str, rerun: bool = False) -> int:
+    result = _dispatcher().run_one(Path(manifest), rerun=rerun)
     print(result)
     return 0 if result == "finished" else 1
 
@@ -74,7 +75,12 @@ if __name__ == "__main__":
         if args[0] == "queue":
             raise SystemExit(cmd_queue())
         if args[0] == "run":
-            raise SystemExit(cmd_run(args[1]))
+            rerun = "--rerun" in args[1:]
+            manifests = [a for a in args[1:] if a != "--rerun"]
+            if len(manifests) != 1:
+                print(__doc__)
+                raise SystemExit(2)
+            raise SystemExit(cmd_run(manifests[0], rerun=rerun))
         raise SystemExit(cmd_status())
     except ConfigError as e:
         print(f"[設定エラー] {e}", file=sys.stderr)
