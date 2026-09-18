@@ -48,6 +48,14 @@ class QueueState:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def clear(self, job_name: str) -> bool:
+        """終端のやり直しを明示的に行うための state 削除。消した時だけ True。"""
+        if job_name not in self.state:
+            return False
+        del self.state[job_name]
+        self.path.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+
 
 # runner 契約: (manifest, manifest の親 dir, 解決済み名義) -> exit code
 RunnerFn = Callable[[JobManifest, Path, Identity], int]
@@ -95,7 +103,11 @@ class Dispatcher:
             results[path.stem] = self.run_one(path)
         return results
 
-    def run_one(self, manifest_path: Path) -> str:
+    def run_one(self, manifest_path: Path, rerun: bool = False) -> str:
+        """rerun=True は「終端のやり直しは state 削除で明示的に」を CLI から行う経路。
+
+        manifest が読めない場合は消さない (壊れた manifest で finished を失わないため)。
+        """
         try:
             job = JobManifest.load(manifest_path)
         except ManifestError as e:
@@ -110,8 +122,16 @@ class Dispatcher:
             return "rejected"
 
         # 終端チェックは名義解決より先 (後からの設定エラーで finished を上書きしない)
+        if rerun and self.state.clear(job.name):
+            self.ledger.record_run(job.name, "-", job.identity, "rerun_requested", "state cleared")
         if self.state.get(job.name) in TERMINAL:
-            return self.state.get(job.name)  # 自動再開: 終端済みはスキップ
+            # 自動再開: 終端済みはスキップ。戻り値だけでは実走と見分けられないため明示する
+            print(
+                f"[skipped] {job.name}: 終端済み ({self.state.get(job.name)}) のため実行していない。"
+                "やり直すには run --rerun",
+                file=sys.stderr,
+            )
+            return self.state.get(job.name)
 
         try:
             ident = self.identities.resolve(job.identity, job.runner)
