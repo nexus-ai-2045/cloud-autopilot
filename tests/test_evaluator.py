@@ -75,3 +75,12 @@ def test_read_score_rejects_non_object_container(tmp_path, raw):
     (outdir / RESULT_FILE).write_text(raw, encoding="utf-8")
     with pytest.raises(ScoreError):
         read_score(tmp_path, "kernel")
+
+
+def test_read_score_huge_int_is_score_error_not_overflow(tmp_path):
+    """float に変換できない巨大整数は OverflowError ではなく ScoreError (dispatcher が掴める)。"""
+    outdir = tmp_path / "kernel" / "output"
+    outdir.mkdir(parents=True)
+    (outdir / RESULT_FILE).write_text('{"score": 1' + "0" * 400 + "}", encoding="utf-8")
+    with pytest.raises(ScoreError):
+        read_score(tmp_path, "kernel")

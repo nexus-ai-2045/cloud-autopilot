@@ -55,6 +55,12 @@ def read_score(base_dir: Path | str, entrypoint: str) -> float | None:
     if "score" not in data:
         return None
     value = data["score"]
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ScoreError(f"score が有限の数値でない: {value!r} ({path})")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:  # float に変換できない巨大 int
+        finite = False
+    if not finite:
+        raise ScoreError(f"score が有限の数値でない: {str(value)[:40]} ({path})")
     return float(value)
