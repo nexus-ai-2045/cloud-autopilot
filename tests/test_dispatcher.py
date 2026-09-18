@@ -368,3 +368,40 @@ def test_malformed_result_container_does_not_abort_queue(tmp_path):
 
     d = Dispatcher({"local": fake_runner}, tmp_path, identities=BOOK)
     assert d.run_queue(q) == {"job-s": "failed"}
+
+
+def test_terminal_skip_is_visible_and_rerun_is_explicit(tmp_path, capsys):
+    """終端済みジョブのスキップは戻り値が実走と同じ "finished" になる。
+
+    過去の実害: sim-suite の再実測で、実行されていないのに finished と表示され、
+    台帳の時刻を見るまでスキップに気付けなかった。スキップは stderr に明示し、
+    やり直しは rerun=True (= state の明示削除) の時だけ起きる。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    manifest = q / "job-r.json"
+    manifest.write_text(
+        json.dumps({"name": "job-r", "runner": "local", "identity": "local", "entrypoint": "kernel"}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def counting_local(job, base, ident):
+        calls.append(job.name)
+        return 0
+
+    d = Dispatcher({"local": counting_local}, tmp_path, identities=BOOK)
+    assert d.run_one(manifest) == "finished"
+    capsys.readouterr()
+
+    assert d.run_one(manifest) == "finished"  # スキップ
+    assert calls == ["job-r"]
+    assert "[skipped] job-r" in capsys.readouterr().err
+
+    assert d.run_one(manifest, rerun=True) == "finished"  # 明示的なやり直し
+    assert calls == ["job-r", "job-r"]
+    assert "[skipped]" not in capsys.readouterr().err
+
+    manifest.write_text("{broken", encoding="utf-8")
+    assert d.run_one(manifest, rerun=True) == "rejected"
+    assert d.state.get("job-r") == "finished"  # 壊れた manifest では終端 state を消さない
