@@ -368,3 +368,17 @@ def test_malformed_result_container_does_not_abort_queue(tmp_path):
 
     d = Dispatcher({"local": fake_runner}, tmp_path, identities=BOOK)
     assert d.run_queue(q) == {"job-s": "failed"}
+
+
+def test_queue_survives_undecodable_manifest(tmp_path):
+    """壊れた (UTF-16) manifest 1 つで run_queue 全体が例外落ちしない。"""
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-ok")
+    (q / "bad-utf16.json").write_text(
+        json.dumps({"name": "bad", "runner": "local", "identity": "local", "entrypoint": "k"}), encoding="utf-16"
+    )
+    d = Dispatcher({"local": lambda j, b, i: 0}, tmp_path, identities=BOOK)
+    results = d.run_queue(q)
+    assert results["job-ok"] == "finished"
+    assert results["bad-utf16"] == "rejected"
