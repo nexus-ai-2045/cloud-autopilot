@@ -48,6 +48,20 @@ def build_kernel_metadata(job: JobManifest, account: str) -> dict:
     }
 
 
+_STATUS_RE = re.compile(r"KernelWorkerStatus\.([A-Z_]+)")
+
+
+def parse_kernel_status(text: str) -> str | None:
+    """`kaggle kernels status` の出力から状態トークンだけを取り出す。
+
+    行全体への部分一致 ("error" in ...) は slug (ユーザー名 / ジョブ名) に含まれる語で
+    誤判定するため、`KernelWorkerStatus.<STATE>` の形だけを信頼する。取れなければ None
+    (= 判定保留で polling 継続)。
+    """
+    m = _STATUS_RE.search(text)
+    return m.group(1) if m else None
+
+
 def _kaggle_cli() -> str:
     exe = shutil.which("kaggle")
     if exe:
@@ -85,7 +99,8 @@ def run_job(job: JobManifest, base_dir: Path, ident: Identity) -> int:
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    ledger.record_run(job.name, "kaggle", job.identity, "started", f"push {kernel_dir}", account=ident.account)
+    # started は dispatcher が記録する。runner 側は経過 (checkpoint) だけ残す (二重記録防止)
+    ledger.record_run(job.name, "kaggle", job.identity, "checkpoint", f"push {kernel_dir}", account=ident.account)
     out = call_with_backoff(lambda: _run(["kernels", "push", "-p", str(kernel_dir)]), api_name="kaggle:push", ledger=ledger)
     print(out.strip())
     m = re.search(r"(?:kernels|code)/([\w-]+/[\w-]+)", out)
@@ -95,7 +110,8 @@ def run_job(job: JobManifest, base_dir: Path, ident: Identity) -> int:
     while time.time() < deadline:
         status = call_with_backoff(lambda: _run(["kernels", "status", slug]), api_name="kaggle:status", ledger=ledger)
         print(status.strip())
-        if "complete" in status.lower():
+        state = parse_kernel_status(status)
+        if state == "COMPLETE":
             outdir = kernel_dir / "output"
             outdir.mkdir(exist_ok=True)
             # -o (--force): ローカルに古い同名ファイルがあっても必ずクラウド側の出力で上書きする
@@ -108,7 +124,7 @@ def run_job(job: JobManifest, base_dir: Path, ident: Identity) -> int:
                 f"output collected {slug}", account=ident.account,
             )
             return 0
-        if "error" in status.lower() or "cancel" in status.lower():
+        if state is not None and (state == "ERROR" or state.startswith("CANCEL")):
             ledger.record_run(job.name, "kaggle", job.identity, "failed", status.strip()[:200], account=ident.account)
             return 1
         time.sleep(POLL_INTERVAL)

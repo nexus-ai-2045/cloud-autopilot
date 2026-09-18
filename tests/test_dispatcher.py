@@ -405,3 +405,17 @@ def test_terminal_skip_is_visible_and_rerun_is_explicit(tmp_path, capsys):
     manifest.write_text("{broken", encoding="utf-8")
     assert d.run_one(manifest, rerun=True) == "rejected"
     assert d.state.get("job-r") == "finished"  # 壊れた manifest では終端 state を消さない
+
+
+def test_queue_survives_undecodable_manifest(tmp_path):
+    """壊れた (UTF-16) manifest 1 つで run_queue 全体が例外落ちしない。"""
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-ok")
+    (q / "bad-utf16.json").write_text(
+        json.dumps({"name": "bad", "runner": "local", "identity": "local", "entrypoint": "k"}), encoding="utf-16"
+    )
+    d = Dispatcher({"local": lambda j, b, i: 0}, tmp_path, identities=BOOK)
+    results = d.run_queue(q)
+    assert results["job-ok"] == "finished"
+    assert results["bad-utf16"] == "rejected"
