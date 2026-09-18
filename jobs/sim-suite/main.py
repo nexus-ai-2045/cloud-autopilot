@@ -43,6 +43,34 @@ class Product:
     parameters: dict
 
 
+@dataclass(frozen=True)
+class RunResult:
+    """1 回の製品実行の結果。output は決定論比較の対象、stdout は実行 receipt の対象。"""
+
+    output: bytes
+    cmd: list
+    stdout: bytes
+    # 製品側が出す証拠 (run_id / hash 等)。run.completed の payload へそのまま束縛する
+    product_evidence: dict | None = None
+
+
+ADAPTER_ID = "cloud-autopilot/sim-suite"
+
+
+def resolve_source_revision(repo: Path) -> str:
+    """実行対象 checkout の exact HEAD を返す。dirty なら receipt が嘘になるため fail-closed。"""
+    head = run_command(["git", "rev-parse", "HEAD"], cwd=repo).stdout.decode("ascii").strip()
+    if len(head) != 40:
+        raise RuntimeError(f"{repo.name}: git HEAD を解決できない ({head!r})")
+    dirty = run_command(["git", "status", "--porcelain"], cwd=repo).stdout.strip()
+    if dirty:
+        raise RuntimeError(
+            f"{repo.name}: checkout が dirty のため source_revision を主張できない\n"
+            + dirty.decode("utf-8", "replace")[:500]
+        )
+    return head
+
+
 def run_command(cmd: list[str], cwd: Path, env_extra: dict | None = None) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     if env_extra:
@@ -66,24 +94,41 @@ def resolve_npm() -> str:
     return npm
 
 
-def run_ghost(repo: Path, workdir: Path, attempt: int) -> tuple[bytes, list[str]]:
+def run_ghost(repo: Path, workdir: Path, attempt: int) -> RunResult:
     out = workdir / f"ghost-attempt{attempt}.json"
     cmd = [
         sys.executable, "-m", "ghost_in_the_sim.batch_cli",
         "--output", str(out), "--seed", "42",
         "--actual-ai-trace", "fixtures/actual-ai-trace-seed42.json",
     ]
-    run_command(cmd, cwd=repo, env_extra={"PYTHONPATH": "src"})
-    return out.read_bytes(), cmd
+    proc = run_command(cmd, cwd=repo, env_extra={"PYTHONPATH": "src"})
+    return RunResult(out.read_bytes(), cmd, proc.stdout)
 
 
-def run_space(repo: Path, workdir: Path, attempt: int) -> tuple[bytes, list[str]]:
-    cmd = [sys.executable, "scripts/run_phase1_fixture.py"]
+def run_space(repo: Path, workdir: Path, attempt: int) -> RunResult:
+    # run_bundle.py は既存 path への上書きを拒否する (仕様) ため、実行ごとに一意な path を使う
+    tag = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + f"-{os.getpid()}"
+    out = workdir / f"space-run-bundle-{tag}-attempt{attempt}.json"
+    cmd = [sys.executable, "scripts/run_bundle.py", str(out)]
     proc = run_command(cmd, cwd=repo)
-    return proc.stdout, cmd
+    # 製品側の再実行検証 (fixture 再読込 + runtime 再実行 + canonical 等値) を通してから採用する
+    run_command([sys.executable, "scripts/run_bundle.py", "--verify", str(out)], cwd=repo)
+    output = out.read_bytes()
+    bundle = json.loads(output.decode("utf-8"))
+    if bundle["run_request"]["seed"] != SPACE_SEED:
+        raise RuntimeError("space-civilization-choice: 製品 bundle の seed が Product 定義と一致しない")
+    evidence = {
+        "product_run_id": bundle["run_id"],
+        "product_event_count": bundle["evidence"]["event_count"],
+        "product_event_stream_hash": bundle["evidence"]["event_stream_hash"],
+        "product_event_stream_head_hash": bundle["evidence"]["event_stream_head_hash"],
+        "product_comparison_hash": bundle["replay"]["comparison_hash"],
+        "product_verify": "run_bundle.py --verify PASS",
+    }
+    return RunResult(output, cmd, proc.stdout, evidence)
 
 
-def run_fiction(repo: Path, workdir: Path, attempt: int) -> tuple[bytes, list[str]]:
+def run_fiction(repo: Path, workdir: Path, attempt: int) -> RunResult:
     out = workdir / f"fiction-attempt{attempt}.json"
     cmd = [
         sys.executable, "-m", "fiction_forks", "social",
@@ -99,20 +144,23 @@ def run_fiction(repo: Path, workdir: Path, attempt: int) -> tuple[bytes, list[st
     stdout_text = proc.stdout.decode("utf-8", "replace")
     if '"status": "error"' in stdout_text or not out.exists():
         raise RuntimeError(f"fiction-forks run failed: {stdout_text[-500:]}")
-    return out.read_bytes(), cmd
+    return RunResult(out.read_bytes(), cmd, proc.stdout)
 
 
-def run_quiet(repo: Path, workdir: Path, attempt: int) -> tuple[bytes, list[str]]:
+def run_quiet(repo: Path, workdir: Path, attempt: int) -> RunResult:
     cmd = [resolve_npm(), "run", "simulate", "--silent"]
     proc = run_command(cmd, cwd=repo / "app")
-    return proc.stdout, cmd
+    return RunResult(proc.stdout, cmd, proc.stdout)
 
+
+# space-civilization-choice の三分岐 fixture が共有する seed (fixtures/phase1_*.json)
+SPACE_SEED = 20260828
 
 PRODUCTS: list[tuple[Product, object]] = [
     (Product("ghost-in-the-sim", "distributed-crisis-response", 42,
              {"trace": "fixtures/actual-ai-trace-seed42.json"}), run_ghost),
-    (Product("space-civilization-choice", "phase1-fixture", 0,
-             {"entrypoint": "scripts/run_phase1_fixture.py"}), run_space),
+    (Product("space-civilization-choice", "three-branch-run-bundle", SPACE_SEED,
+             {"entrypoint": "scripts/run_bundle.py", "verified_by": "scripts/run_bundle.py --verify"}), run_space),
     (Product("fiction-forks", "japan-2036-doraemon-public-tools", 42,
              {"provider": "fixture", "fixture": "fixtures/social/japan-2036-cooperation.jsonl"}), run_fiction),
     (Product("quiet-orchestrator-japan", "p0-baseline", 0,
@@ -130,20 +178,27 @@ def event_stream_sha256(events: list[dict]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def build_bundle(product: Product, cmd: list[str], output_bytes: bytes) -> dict:
-    started = utc_now()
+def build_bundle(product: Product, result: RunResult, source_revision: str,
+                 started: str, completed: str) -> dict:
+    """started / completed は 2 回の実走を挟んで main() が実測した実行窓。
+
+    Studio 契約は event 時刻が実行窓の内側にあることを要求するため、
+    event の occurred_at は窓の両端だけを使い、build 時刻を混ぜない。
+    """
     run_id = f"live-{product.product_id}-{started.replace(':', '').replace('-', '')}"
-    output_digest = hashlib.sha256(output_bytes).hexdigest()
+    output_digest = hashlib.sha256(result.output).hexdigest()
+    completed_payload = {"exit_code": 0, "output_sha256": output_digest,
+                         "output_bytes": len(result.output)}
+    if result.product_evidence:
+        completed_payload["product_evidence"] = result.product_evidence
     events = [
         {"run_id": run_id, "sequence": 0, "event_type": "run.started",
          "occurred_at": started,
-         "payload": {"command": cmd, "runner": "cloud-autopilot/local"}},
+         "payload": {"command": result.cmd, "runner": "cloud-autopilot/local"}},
         {"run_id": run_id, "sequence": 1, "event_type": "run.completed",
-         "occurred_at": utc_now(),
-         "payload": {"exit_code": 0, "output_sha256": output_digest,
-                     "output_bytes": len(output_bytes)}},
+         "occurred_at": completed, "payload": completed_payload},
         {"run_id": run_id, "sequence": 2, "event_type": "determinism.checked",
-         "occurred_at": utc_now(),
+         "occurred_at": completed,
          "payload": {"attempts": 2, "identical_output": True}},
     ]
     digest = event_stream_sha256(events)
@@ -166,6 +221,17 @@ def build_bundle(product: Product, cmd: list[str], output_bytes: bytes) -> dict:
             "verification": "live-command", "generated_at": utc_now(),
             "source_repository": f"nexus-ai-2045/{product.product_id}",
             "event_stream_sha256": digest,
+            "execution": {
+                "adapter_id": ADAPTER_ID,
+                "command": [str(part) for part in result.cmd],
+                "exit_code": 0,
+                "started_at": started,
+                "completed_at": completed,
+                "source_revision": source_revision,
+                # 1 回目の実走の stdout。出力を file へ書く製品では path 文字列になるため、
+                # 内容の束縛は run.completed の output_sha256 / product_evidence が担う
+                "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(),
+            },
         },
     }
 
@@ -193,11 +259,16 @@ def main() -> int:
         repo = REPOS_ROOT / product.product_id
         if not repo.is_dir():
             raise RuntimeError(f"{product.product_id}: checkout が無い ({repo})。SIM_REPOS_ROOT を確認する")
-        first, cmd = runner(repo, workdir, 1)
-        second, _ = runner(repo, workdir, 2)
-        if first != second:
+        source_revision = resolve_source_revision(repo)
+        started = utc_now()
+        first = runner(repo, workdir, 1)
+        second = runner(repo, workdir, 2)
+        completed = utc_now()
+        if first.output != second.output:
             raise RuntimeError(f"{product.product_id}: 2回の実行結果が一致しない (非決定論)")
-        bundle = build_bundle(product, cmd, first)
+        if resolve_source_revision(repo) != source_revision:
+            raise RuntimeError(f"{product.product_id}: 実走中に checkout の HEAD が変わった")
+        bundle = build_bundle(product, first, source_revision, started, completed)
         path = bundle_dir / f"{product.product_id}.json"
         path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         bundle_paths.append(path)
