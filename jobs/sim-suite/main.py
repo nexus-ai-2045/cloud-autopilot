@@ -57,6 +57,31 @@ class RunResult:
 ADAPTER_ID = "cloud-autopilot/sim-suite"
 
 
+def portable_argv(cmd: list, workdir: Path) -> list[str]:
+    """receipt に残す argv から実行機固有の絶対パスを除く。
+
+    bundle は証拠として他 repo へ保存・共有されるため、interpreter の実体 path や
+    作業 dir をそのまま書くと個人環境の path が正本に残る。置換できない絶対パスが
+    残った場合は fail-closed (黙って漏らさない)。
+    """
+    root = workdir.resolve()
+    portable: list[str] = []
+    for raw in cmd:
+        part = str(raw)
+        path = Path(part)
+        if not path.is_absolute():
+            portable.append(part)
+        elif part == sys.executable:
+            portable.append("python")
+        elif path.name.lower() in ("npm", "npm.cmd"):
+            portable.append("npm")
+        elif path.resolve().is_relative_to(root):
+            portable.append("{workdir}/" + path.resolve().relative_to(root).as_posix())
+        else:
+            raise RuntimeError(f"receipt に残せない絶対パスが argv にある: {path.name}")
+    return portable
+
+
 def resolve_source_revision(repo: Path) -> str:
     """実行対象 checkout の exact HEAD を返す。dirty なら receipt が嘘になるため fail-closed。"""
     head = run_command(["git", "rev-parse", "HEAD"], cwd=repo).stdout.decode("ascii").strip()
@@ -179,13 +204,14 @@ def event_stream_sha256(events: list[dict]) -> str:
 
 
 def build_bundle(product: Product, result: RunResult, source_revision: str,
-                 started: str, completed: str) -> dict:
+                 started: str, completed: str, workdir: Path) -> dict:
     """started / completed は 2 回の実走を挟んで main() が実測した実行窓。
 
     Studio 契約は event 時刻が実行窓の内側にあることを要求するため、
     event の occurred_at は窓の両端だけを使い、build 時刻を混ぜない。
     """
     run_id = f"live-{product.product_id}-{started.replace(':', '').replace('-', '')}"
+    argv = portable_argv(result.cmd, workdir)
     output_digest = hashlib.sha256(result.output).hexdigest()
     completed_payload = {"exit_code": 0, "output_sha256": output_digest,
                          "output_bytes": len(result.output)}
@@ -194,7 +220,7 @@ def build_bundle(product: Product, result: RunResult, source_revision: str,
     events = [
         {"run_id": run_id, "sequence": 0, "event_type": "run.started",
          "occurred_at": started,
-         "payload": {"command": result.cmd, "runner": "cloud-autopilot/local"}},
+         "payload": {"command": argv, "runner": "cloud-autopilot/local"}},
         {"run_id": run_id, "sequence": 1, "event_type": "run.completed",
          "occurred_at": completed, "payload": completed_payload},
         {"run_id": run_id, "sequence": 2, "event_type": "determinism.checked",
@@ -223,7 +249,7 @@ def build_bundle(product: Product, result: RunResult, source_revision: str,
             "event_stream_sha256": digest,
             "execution": {
                 "adapter_id": ADAPTER_ID,
-                "command": [str(part) for part in result.cmd],
+                "command": argv,
                 "exit_code": 0,
                 "started_at": started,
                 "completed_at": completed,
@@ -268,7 +294,7 @@ def main() -> int:
             raise RuntimeError(f"{product.product_id}: 2回の実行結果が一致しない (非決定論)")
         if resolve_source_revision(repo) != source_revision:
             raise RuntimeError(f"{product.product_id}: 実走中に checkout の HEAD が変わった")
-        bundle = build_bundle(product, first, source_revision, started, completed)
+        bundle = build_bundle(product, first, source_revision, started, completed, workdir)
         path = bundle_dir / f"{product.product_id}.json"
         path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         bundle_paths.append(path)

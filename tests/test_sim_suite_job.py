@@ -112,3 +112,24 @@ def test_main_fails_closed_on_nondeterminism_without_score(tmp_path, monkeypatch
         assert "一致しない" in str(e)
     assert raised
     assert not (outdir / "sim_result.json").exists()  # 空振りに score を残さない
+
+
+def test_receipt_argv_drops_machine_specific_absolute_paths(tmp_path):
+    """bundle は証拠として他 repo へ保存されるため、argv に実行機固有の絶対パスを残さない。"""
+    workdir = tmp_path / "output"
+    workdir.mkdir()
+    out = workdir / "space-attempt1.json"
+    argv = sim_suite.portable_argv(
+        [sys.executable, "scripts/run_bundle.py", str(out), "--seed", "42"], workdir
+    )
+    assert argv == ["python", "scripts/run_bundle.py", "{workdir}/space-attempt1.json", "--seed", "42"]
+    assert str(tmp_path) not in json.dumps(argv)
+
+    outside = tmp_path / "elsewhere" / "secret.json"
+    try:
+        sim_suite.portable_argv([sys.executable, str(outside)], workdir)
+        raised = False
+    except RuntimeError as e:
+        raised = True
+        assert str(tmp_path) not in str(e)  # エラー文にも path を出さない
+    assert raised
