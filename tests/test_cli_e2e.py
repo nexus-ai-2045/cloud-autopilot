@@ -1,6 +1,7 @@
 """autopilot.py の CLI を入口から通す E2E (隔離コピー上で実行。repo の data/ には触らない)。"""
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -24,9 +25,10 @@ def clone(tmp_path):
     return dst
 
 
-def _run(clone, *args):
+def _run(clone, *args, extra_env=None):
+    child_env = {**os.environ, **(extra_env or {})}
     return subprocess.run(
-        [sys.executable, "autopilot.py", *args], cwd=str(clone),
+        [sys.executable, "autopilot.py", *args], cwd=str(clone), env=child_env,
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
     )
 
@@ -61,3 +63,16 @@ def test_status_works_on_empty_ledger(clone):
     r = _run(clone, "status")
     assert r.returncode == 0
     json.loads(r.stdout)
+
+
+@pytest.mark.parametrize("args, expected", [(("status",), 0), (("run",), 2)])
+def test_cli_survives_non_utf8_console(clone, args, expected):
+    """日本語メッセージを非 UTF-8 コンソール (英語 Windows の cp1252 等) でも落とさず出す。
+
+    過去バグ: CI の windows ランナー (cp1252) で print が UnicodeEncodeError になり、
+    clone して最初のコマンドが exit 1 で落ちた。日本語 Windows (cp932) では再現しないため
+    手元のテストでは見えなかった。コンソールの文字コードを cp1252 に強制して OS を問わず再現する。
+    """
+    r = _run(clone, *args, extra_env={"PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"})
+    assert "UnicodeEncodeError" not in r.stderr
+    assert r.returncode == expected

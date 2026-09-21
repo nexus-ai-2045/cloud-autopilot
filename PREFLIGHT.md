@@ -11,7 +11,7 @@
 - [x] README / LICENSE / SECURITY.md / CONTRIBUTING.md
 - [x] test (pytest 全緑 (件数は `python -m pytest tests -q` の実測が正本) / バグ注入 3 種で検出力確認済み)
 - [x] secret / PII / personal path / history (secret scan 0 件・個人識別子 regex で全履歴 0 件・陽性対照つき)
-- [x] dependency (標準ライブラリのみ。テストのみ pytest) / CI workflow (未導入)
+- [x] dependency (標準ライブラリのみ。テストのみ pytest) / CI workflow (`.github/workflows/test.yml`: PR と main で pytest。action は SHA 固定)
 - [ ] operations / monitoring / rollback (内部運用ツールのため対象外)
 - [x] GitHub owner / author identity (org noreply 名義で commit)
 
@@ -46,4 +46,4 @@
 ## 人間目視 (完成度監査の修正 PR)
 
 - 6 レンズ監査で確定した finding の修正。設計判断は docs/adr/0001, 0002 に記録
-- decision: (merge 時に記入)
+- decision: approve (PR #7 は squash merge 済み a5283cf)

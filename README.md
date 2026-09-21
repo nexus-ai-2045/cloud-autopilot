@@ -111,8 +111,9 @@ flowchart LR
 
 - `jobs/queue/` に manifest を置くと `python autopilot.py queue` が順に実行する。
   終端状態 (`finished` / `failed`) のジョブはスキップされる
-  (= 中断しても再実行で続きから走る)。終端ジョブをやり直すには `data/queue_state.json` の
-  該当エントリを消して明示的に再実行する
+  (= 中断しても再実行で続きから走る)。スキップした時は stderr に `[skipped]` と理由を出す。
+  終端ジョブをやり直すには `python autopilot.py run <manifest> --rerun` で明示的に再実行する
+  (終端 state を消して走らせ直し、台帳に `rerun_requested` を残す)
 - `rejected` (manifest 不備・名義未解決) は**終端ではない**。設定を直せば次回の実行で
   自動的に再検証される。理由は stderr に出るほか、`python autopilot.py status` でも確認できる
 - 同じ `name` を宣言する manifest が queue に 2 つ以上あると、2 件目以降は rejected になる
@@ -213,6 +214,7 @@ jobs/
   sim-smoke/            サンプル: シード固定 Schelling モデル (kaggle + local fallback, score 契約)
   sim-suite/            メタ安全保障 4 シミュレーターの実走 (queue 非同梱。run で明示実行。要: 製品 checkout + NPM_CMD)
   queue/                ここに manifest を置くとキューに乗る
-docs/adr/               設計判断の記録 (ADR)
+.github/workflows/      CI (PR と main で pytest: ubuntu 3.10 / 3.13 + windows 3.13)
+docs/adr/               設計判断の記録 (ADR)。v2 の層ロードマップは ADR-0003
 tests/                  pytest (ユニット + 統合 + CLI E2E + サンプルの再現性検証)
 ```

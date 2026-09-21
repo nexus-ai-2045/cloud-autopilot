@@ -66,7 +66,19 @@ def cmd_status() -> int:
     return 0
 
 
+def _force_utf8_stdio() -> None:
+    """日本語メッセージを非 UTF-8 コンソール (英語 Windows の cp1252 等) でも落とさず出す。
+
+    runner や dispatcher の print も同じ stdout / stderr を通るので、入口で 1 回だけ設定する。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 if __name__ == "__main__":
+    _force_utf8_stdio()
     args = sys.argv[1:]
     if not args or args[0] not in ("queue", "run", "status") or (args[0] == "run" and len(args) < 2):
         print(__doc__)
