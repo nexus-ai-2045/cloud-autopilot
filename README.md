@@ -121,7 +121,7 @@ flowchart LR
 - 同梱 queue には clean clone + `config.local.json` だけで走るジョブしか置かない
   ([ADR-0001](docs/adr/0001-queue-bundled-jobs-must-be-environment-independent.md))。外部 checkout や
   外部 CLI が要るジョブは `jobs/<name>/job.json` に置き、`python autopilot.py run jobs/<name>/job.json` で明示実行する
-- サンプル: [jobs/sim-smoke/](jobs/sim-smoke/) — シード固定の Schelling 分居モデル。
+- サンプル: [jobs/sim-smoke/job.json](jobs/sim-smoke/job.json) — シード固定の Schelling 分居モデル。
   同じシードなら Kaggle でもローカルでも同じ結果になる (再現性の実証)
 
 ### 評価契約 (score)
