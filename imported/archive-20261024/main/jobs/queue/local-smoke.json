@@ -1,0 +1,7 @@
+{
+  "name": "local-smoke",
+  "runner": "local",
+  "identity": "local",
+  "entrypoint": "../local-smoke",
+  "notes": "自走ループの E2E 確認用。ローカルで完結"
+}

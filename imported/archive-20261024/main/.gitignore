@@ -1,0 +1,6 @@
+# 実行時生成物 (台帳・ジョブ出力) はローカルのみ
+data/*.jsonl
+jobs/*/kernel/output/
+__pycache__/
+*.pyc
+.pytest_cache/

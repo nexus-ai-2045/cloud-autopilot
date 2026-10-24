@@ -1,0 +1,99 @@
+"""cloud-autopilot 入口。
+
+使い方:
+    python autopilot.py queue              # jobs/queue/*.json を順に実行 (自動再開つき)
+    python autopilot.py run <manifest>     # 単発ジョブ実行 (終端済みは [skipped] と表示して実行しない)
+    python autopilot.py run <manifest> --rerun   # 終端 state を明示的に消してやり直す
+    python autopilot.py status             # 台帳とキュー状態の要約
+
+事前準備 (初回のみ):
+    cp config.example.json config.local.json
+    → 自分のアカウント名を記入 (config.local.json は commit されない)
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from core.config import CONFIG_LOCAL, ConfigError, IdentityBook  # noqa: E402
+from core.dispatcher import Dispatcher  # noqa: E402
+from core.ledger import Ledger  # noqa: E402
+from runners.registry import RUNNERS  # noqa: E402
+
+DATA = ROOT / "data"
+QUEUE = ROOT / "jobs" / "queue"
+
+
+def _dispatcher() -> Dispatcher:
+    """名義帳を読み込んで Dispatcher を組む。設定不備はここで止まる (fail-closed)。"""
+    identities = IdentityBook.load(ROOT / CONFIG_LOCAL)
+    return Dispatcher(RUNNERS, DATA, identities=identities)
+
+
+def cmd_queue() -> int:
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    results = _dispatcher().run_queue(QUEUE)
+    print(json.dumps(results, ensure_ascii=False, indent=2))
+    return 0 if all(v in ("finished",) for v in results.values()) or not results else 1
+
+
+def cmd_run(manifest: str, rerun: bool = False) -> int:
+    result = _dispatcher().run_one(Path(manifest), rerun=rerun)
+    print(result)
+    return 0 if result == "finished" else 1
+
+
+def cmd_status() -> int:
+    ledger = Ledger(DATA)
+    runs = ledger.read("runs.jsonl")
+    limits = ledger.read("rate_limit.jsonl")
+    state_file = DATA / "queue_state.json"
+    state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
+    print(json.dumps(
+        {
+            "実行イベント数": len(runs),
+            "直近の実行": runs[-3:],
+            "レート制限イベント数": len(limits),
+            "キュー状態": state,
+        },
+        ensure_ascii=False, indent=2,
+    ))
+    return 0
+
+
+def _force_utf8_stdio() -> None:
+    """日本語メッセージを非 UTF-8 コンソール (英語 Windows の cp1252 等) でも落とさず出す。
+
+    runner や dispatcher の print も同じ stdout / stderr を通るので、入口で 1 回だけ設定する。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+if __name__ == "__main__":
+    _force_utf8_stdio()
+    args = sys.argv[1:]
+    if not args or args[0] not in ("queue", "run", "status") or (args[0] == "run" and len(args) < 2):
+        print(__doc__)
+        raise SystemExit(2)
+    try:
+        if args[0] == "queue":
+            raise SystemExit(cmd_queue())
+        if args[0] == "run":
+            rerun = "--rerun" in args[1:]
+            manifests = [a for a in args[1:] if a != "--rerun"]
+            if len(manifests) != 1:
+                print(__doc__)
+                raise SystemExit(2)
+            raise SystemExit(cmd_run(manifests[0], rerun=rerun))
+        raise SystemExit(cmd_status())
+    except ConfigError as e:
+        print(f"[設定エラー] {e}", file=sys.stderr)
+        raise SystemExit(2)

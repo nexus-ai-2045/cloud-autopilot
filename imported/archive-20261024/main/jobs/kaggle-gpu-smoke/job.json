@@ -1,0 +1,8 @@
+{
+  "name": "cloud-autopilot-gpu-smoke",
+  "runner": "kaggle",
+  "identity": "ainexus2045",
+  "entrypoint": "kernel",
+  "gpu": true,
+  "notes": "Kaggle 無料 GPU (T4x2/P100) の割当実測。週30h 枠を消費するのは数分"
+}

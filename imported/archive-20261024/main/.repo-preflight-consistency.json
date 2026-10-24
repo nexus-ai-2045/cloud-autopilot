@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nexus-ai-2045/repo-preflight/main/schemas/repository-consistency.schema.json",
+  "schema": "repo-preflight.consistency/v1",
+  "mode": "shadow",
+  "ratchet": {"baseline": []},
+  "markdown": {"include": ["README.md", "docs/**/*.md", "runners/**/*.md"]},
+  "readme_contracts": {
+    "required_paths": ["autopilot.py", "docs/connection-map.md"],
+    "commands": [{"text": "python autopilot.py queue", "paths": ["autopilot.py"]}]
+  },
+  "impact_map": [
+    {"change": ["core/**", "runners/**"], "requires_any": ["README.md", "docs/**", "tests/**"]}
+  ]
+}

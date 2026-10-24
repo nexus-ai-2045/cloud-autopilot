@@ -1,0 +1,8 @@
+{
+  "_readme": "cp config.example.json config.local.json して、自分のアカウント名を記入する。config.local.json は gitignore 済みで commit されない。manifest の identity フィールドにはここのエイリアス名 (kaggle-main 等) を書く。",
+  "identities": {
+    "kaggle-main": {"runner": "kaggle", "account": "your-kaggle-username"},
+    "colab-main": {"runner": "colab", "account": "your-colab-address@example.com"},
+    "local": {"runner": "local", "account": "local"}
+  }
+}

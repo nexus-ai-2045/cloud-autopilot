@@ -1,0 +1,421 @@
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from core.config import IdentityBook
+from core.dispatcher import Dispatcher
+
+# テスト用の名義帳。実アカウント名は一切使わない (repo 全体の方針)。
+BOOK = IdentityBook.from_dict(
+    {
+        "identities": {
+            "local": {"runner": "local", "account": "local"},
+            "kaggle-main": {"runner": "kaggle", "account": "test-kaggle-user"},
+        }
+    }
+)
+
+
+def _write_job(dirpath: Path, name: str, runner: str = "local", fallback=None) -> Path:
+    manifest = {
+        "name": name,
+        "runner": runner,
+        "identity": {"local": "local", "kaggle": "kaggle-main"}.get(runner, "local"),
+        "entrypoint": "kernel",
+    }
+    if fallback:
+        manifest["fallback"] = fallback
+    path = dirpath / f"{name}.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
+def test_queue_runs_and_persists(tmp_path):
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-a")
+    calls = []
+
+    def fake_local(job, base, ident):
+        calls.append((job.name, ident.account))
+        return 0
+
+    d = Dispatcher({"local": fake_local}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-a": "finished"}
+    # 自動再開: 2 回目は終端済みスキップで runner を呼ばない
+    d2 = Dispatcher({"local": fake_local}, tmp_path, identities=BOOK)
+    assert d2.run_queue(q) == {"job-a": "finished"}
+    assert calls == [("job-a", "local")]
+
+
+def test_fallback_to_local_on_failure(tmp_path):
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-b", runner="kaggle", fallback=["local"])
+
+    def failing_kaggle(job, base, ident):
+        raise RuntimeError("kaggle 死亡")
+
+    def ok_local(job, base, ident):
+        return 0
+
+    d = Dispatcher({"kaggle": failing_kaggle, "local": ok_local}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-b": "finished"}
+    events = [e["event"] for e in d.ledger.read("runs.jsonl")]
+    assert "failed" in events and events[-1] == "finished"
+
+
+def test_invalid_manifest_rejected(tmp_path):
+    q = tmp_path / "queue"
+    q.mkdir()
+    (q / "bad.json").write_text(json.dumps({"name": "bad", "runner": "kaggle", "entrypoint": "k"}), encoding="utf-8")
+    d = Dispatcher({}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"bad": "rejected"}
+
+
+def test_unresolvable_identity_rejected_before_run(tmp_path):
+    """config に無い名義のジョブは runner を呼ばずに rejected (fail-closed)。"""
+    q = tmp_path / "queue"
+    q.mkdir()
+    (q / "ghost.json").write_text(
+        json.dumps({"name": "ghost", "runner": "kaggle", "identity": "no-such-alias", "entrypoint": "k"}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def spy_kaggle(job, base, ident):
+        calls.append(job.name)
+        return 0
+
+    d = Dispatcher({"kaggle": spy_kaggle}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"ghost": "rejected"}
+    assert calls == []  # 名義が解決できないのに走ってはいけない
+    events = d.ledger.read("runs.jsonl")
+    assert events and events[-1]["event"] == "rejected"
+
+
+def test_rejected_is_not_terminal_and_recovers_after_config_fix(tmp_path):
+    """rejected は終端ではない。config を直したら次回実行で自動的に再検証されて走る。
+
+    過去バグ: rejected が TERMINAL に入っていたため、「config に実名を記入せよ」と
+    言われて直しても、state 削除の手術をしない限り永久にスキップされた。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-r", runner="kaggle")
+
+    broken = IdentityBook.from_dict(
+        {"identities": {"local": {"runner": "local", "account": "local"}}}
+    )  # kaggle-main 未登録 = 設定不備
+    d1 = Dispatcher({"kaggle": lambda j, b, i: 0}, tmp_path, identities=broken)
+    assert d1.run_queue(q) == {"job-r": "rejected"}
+
+    # config を直した (= 正しい名義帳で再実行)
+    d2 = Dispatcher({"kaggle": lambda j, b, i: 0}, tmp_path, identities=BOOK)
+    assert d2.run_queue(q) == {"job-r": "finished"}
+    assert d2.state.get("job-r") == "finished"
+
+
+def test_duplicate_job_name_in_queue_rejected(tmp_path):
+    """同じ name を宣言する 2 つ目のファイルは rejected。1 つ目の実行と state は守られる。
+
+    過去バグ: state が name キーのため、2 つ目のファイルが 1 つ目の終端状態を
+    借りて黙ってスキップされた (dict 上は "finished" に見える)。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-dup")  # job-dup.json
+    (q / "zz-other-file.json").write_text(
+        json.dumps({"name": "job-dup", "runner": "local", "identity": "local", "entrypoint": "kernel"}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def counting_local(job, base, ident):
+        calls.append(base)
+        return 0
+
+    d = Dispatcher({"local": counting_local}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-dup": "finished", "zz-other-file": "rejected"}
+    assert len(calls) == 1  # 実行は 1 回だけ
+    assert d.state.get("job-dup") == "finished"  # 重複側が state を汚さない
+    rejected = [e for e in d.ledger.read("runs.jsonl") if e["event"] == "rejected"]
+    assert rejected and "重複" in rejected[-1]["detail"]
+
+
+def test_finished_not_clobbered_by_manifest_breakage_and_no_silent_rerun(tmp_path):
+    """finished 済みジョブの manifest が一時的に壊れても、終端 state を壊さない。
+
+    過去バグ (レビュー Workflow 検出): ManifestError 分岐が終端チェックより前に
+    state.set(stem, "rejected") を無条件で書くため、stem == name の規約下で
+    finished→rejected に上書きされ、rejected 非終端化後は manifest 修復だけで
+    state 削除なしにジョブが黙って再実行された (kaggle なら GPU 枠を再消費)。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    good = json.dumps(
+        {"name": "job-x", "runner": "local", "identity": "local", "entrypoint": "kernel"}
+    )
+    (q / "job-x.json").write_text(good, encoding="utf-8")
+    calls = []
+
+    def counting_local(job, base, ident):
+        calls.append(job.name)
+        return 0
+
+    d = Dispatcher({"local": counting_local}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-x": "finished"}
+
+    (q / "job-x.json").write_text("{broken", encoding="utf-8")  # 編集ミスを再現
+    d2 = Dispatcher({"local": counting_local}, tmp_path, identities=BOOK)
+    assert d2.run_queue(q) == {"job-x": "rejected"}
+    assert d2.state.get("job-x") == "finished"  # 終端 state は守られる
+
+    (q / "job-x.json").write_text(good, encoding="utf-8")  # 修復
+    d3 = Dispatcher({"local": counting_local}, tmp_path, identities=BOOK)
+    assert d3.run_queue(q) == {"job-x": "finished"}
+    assert calls == ["job-x"]  # 再実行しない (やり直しは state 削除で明示的に)
+
+
+def test_broken_json_manifest_does_not_abort_queue(tmp_path):
+    """JSON として読めない manifest はそのジョブの rejected。後続ジョブは走る。
+
+    過去バグ: JobManifest.load が JSONDecodeError を素通ししていたため、
+    壊れた 1 ファイルで run_queue 全体が例外で落ちた。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    (q / "aa-broken.json").write_text("{not json", encoding="utf-8")
+    _write_job(q, "job-ok")
+    d = Dispatcher({"local": lambda j, b, i: 0}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"aa-broken": "rejected", "job-ok": "finished"}
+
+
+def test_all_runners_exhausted(tmp_path):
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-c", runner="local")
+
+    def bad_local(job, base, ident):
+        return 1
+
+    d = Dispatcher({"local": bad_local}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-c": "failed"}
+    assert d.state.get("job-c") == "failed"
+
+
+def test_ledger_records_resolved_account(tmp_path):
+    """台帳には alias と解決済み account の両方が残る (帰属の証跡)。"""
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-d", runner="kaggle")
+
+    def ok_kaggle(job, base, ident):
+        return 0
+
+    d = Dispatcher({"kaggle": ok_kaggle}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-d": "finished"}
+    finished = [e for e in d.ledger.read("runs.jsonl") if e["event"] == "finished"]
+    assert finished[-1]["identity"] == "kaggle-main"
+    assert finished[-1]["account"] == "test-kaggle-user"
+
+
+def test_finished_not_clobbered_by_later_config_error(tmp_path):
+    """finished 済みジョブは、後から名義設定が壊れても rejected に上書きされない。"""
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-e", runner="kaggle")
+    d = Dispatcher({"kaggle": lambda j, b, i: 0}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-e": "finished"}
+
+    # 同じ job 名のまま、未登録エイリアスに書き換える (設定破壊を再現)
+    (q / "job-e.json").write_text(
+        json.dumps({"name": "job-e", "runner": "kaggle", "identity": "no-such", "entrypoint": "kernel"}),
+        encoding="utf-8",
+    )
+    d2 = Dispatcher({"kaggle": lambda j, b, i: 0}, tmp_path, identities=BOOK)
+    assert d2.run_queue(q) == {"job-e": "finished"}  # 終端維持 (再実行も上書きもしない)
+    assert d2.state.get("job-e") == "finished"
+
+
+def test_local_runner_with_relative_base_dir(tmp_path, monkeypatch):
+    """base_dir が相対パスでも local runner が entrypoint を実行できる。
+
+    過去バグ: 子プロセスを cwd=output/ で起動するため、相対 script パスが
+    解決できず必ず失敗していた (事前 exists() は親 cwd 基準で通ってしまう)。
+    """
+    from core.manifest import JobManifest
+    from runners.local.run import run as local_run
+
+    jobdir = tmp_path / "j1" / "kernel"
+    jobdir.mkdir(parents=True)
+    (jobdir / "main.py").write_text("print('rel ok')", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    job = JobManifest.from_dict(
+        {"name": "rel", "runner": "local", "identity": "local", "entrypoint": "kernel"}
+    )
+    assert local_run(job, Path("j1"), None) == 0
+    assert (jobdir / "output" / "local_run.log").exists()
+
+
+def _scored_dispatcher(tmp_path, runner_writes_score: bool, score_required: bool):
+    """score 契約テスト用: runner が output/sim_result.json を書く偽 runner を組む。"""
+    q = tmp_path / "queue"
+    q.mkdir(exist_ok=True)
+    kernel = tmp_path / "kernel"
+    kernel.mkdir(exist_ok=True)
+    manifest = {
+        "name": "job-s",
+        "runner": "local",
+        "identity": "local",
+        "entrypoint": "../kernel",
+    }
+    if score_required:
+        manifest["score_required"] = True
+    (q / "job-s.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def fake_runner(job, base, ident):
+        outdir = kernel / "output"
+        outdir.mkdir(exist_ok=True)
+        payload = {"score": 0.75} if runner_writes_score else {"steps": 3}
+        (outdir / "sim_result.json").write_text(json.dumps(payload), encoding="utf-8")
+        return 0
+
+    return Dispatcher({"local": fake_runner}, tmp_path, identities=BOOK), q
+
+
+def test_scored_job_records_score_in_ledger(tmp_path):
+    d, q = _scored_dispatcher(tmp_path, runner_writes_score=True, score_required=True)
+    assert d.run_queue(q) == {"job-s": "finished"}
+    finished = [e for e in d.ledger.read("runs.jsonl") if e["event"] == "finished"]
+    assert finished[-1]["score"] == 0.75
+
+
+def test_score_required_without_score_fails_closed(tmp_path):
+    """score_required なのに score が無い完走は「成功ログ付きの空振り」— 完走扱いにしない。"""
+    d, q = _scored_dispatcher(tmp_path, runner_writes_score=False, score_required=True)
+    assert d.run_queue(q) == {"job-s": "failed"}
+    events = d.ledger.read("runs.jsonl")
+    assert any("score" in e["detail"] for e in events if e["event"] == "failed")
+
+
+def test_score_optional_job_finishes_without_score(tmp_path):
+    d, q = _scored_dispatcher(tmp_path, runner_writes_score=False, score_required=False)
+    assert d.run_queue(q) == {"job-s": "finished"}
+
+
+def test_stale_score_from_prior_run_fails_closed(tmp_path):
+    """再実行で前回の sim_result.json が残っていても、今回の空振りを完走にしない。
+
+    終端 state を消してやり直す流れでは output/ は残る。新しい invocation が
+    exit 0 でも score を書かないなら、古い score を流用してはいけない。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    kernel = tmp_path / "kernel"
+    outdir = kernel / "output"
+    outdir.mkdir(parents=True)
+    (outdir / "sim_result.json").write_text(json.dumps({"score": 0.99}), encoding="utf-8")
+    (q / "job-s.json").write_text(
+        json.dumps(
+            {
+                "name": "job-s",
+                "runner": "local",
+                "identity": "local",
+                "entrypoint": "../kernel",
+                "score_required": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(job, base, ident):
+        return 0  # 今回は成果物を書かない
+
+    d = Dispatcher({"local": fake_runner}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-s": "failed"}
+    finished = [e for e in d.ledger.read("runs.jsonl") if e["event"] == "finished"]
+    assert finished == []
+
+
+def test_malformed_result_container_does_not_abort_queue(tmp_path):
+    """壊れた sim_result.json はジョブ失敗であり、run_queue 全体の例外ではない。"""
+    q = tmp_path / "queue"
+    q.mkdir()
+    kernel = tmp_path / "kernel"
+    kernel.mkdir()
+    (q / "job-s.json").write_text(
+        json.dumps(
+            {
+                "name": "job-s",
+                "runner": "local",
+                "identity": "local",
+                "entrypoint": "../kernel",
+                "score_required": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_runner(job, base, ident):
+        outdir = kernel / "output"
+        outdir.mkdir(exist_ok=True)
+        (outdir / "sim_result.json").write_text("null", encoding="utf-8")
+        return 0
+
+    d = Dispatcher({"local": fake_runner}, tmp_path, identities=BOOK)
+    assert d.run_queue(q) == {"job-s": "failed"}
+
+
+def test_terminal_skip_is_visible_and_rerun_is_explicit(tmp_path, capsys):
+    """終端済みジョブのスキップは戻り値が実走と同じ "finished" になる。
+
+    過去の実害: sim-suite の再実測で、実行されていないのに finished と表示され、
+    台帳の時刻を見るまでスキップに気付けなかった。スキップは stderr に明示し、
+    やり直しは rerun=True (= state の明示削除) の時だけ起きる。
+    """
+    q = tmp_path / "queue"
+    q.mkdir()
+    manifest = q / "job-r.json"
+    manifest.write_text(
+        json.dumps({"name": "job-r", "runner": "local", "identity": "local", "entrypoint": "kernel"}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def counting_local(job, base, ident):
+        calls.append(job.name)
+        return 0
+
+    d = Dispatcher({"local": counting_local}, tmp_path, identities=BOOK)
+    assert d.run_one(manifest) == "finished"
+    capsys.readouterr()
+
+    assert d.run_one(manifest) == "finished"  # スキップ
+    assert calls == ["job-r"]
+    assert "[skipped] job-r" in capsys.readouterr().err
+
+    assert d.run_one(manifest, rerun=True) == "finished"  # 明示的なやり直し
+    assert calls == ["job-r", "job-r"]
+    assert "[skipped]" not in capsys.readouterr().err
+
+    manifest.write_text("{broken", encoding="utf-8")
+    assert d.run_one(manifest, rerun=True) == "rejected"
+    assert d.state.get("job-r") == "finished"  # 壊れた manifest では終端 state を消さない
+
+
+def test_queue_survives_undecodable_manifest(tmp_path):
+    """壊れた (UTF-16) manifest 1 つで run_queue 全体が例外落ちしない。"""
+    q = tmp_path / "queue"
+    q.mkdir()
+    _write_job(q, "job-ok")
+    (q / "bad-utf16.json").write_text(
+        json.dumps({"name": "bad", "runner": "local", "identity": "local", "entrypoint": "k"}), encoding="utf-16"
+    )
+    d = Dispatcher({"local": lambda j, b, i: 0}, tmp_path, identities=BOOK)
+    results = d.run_queue(q)
+    assert results["job-ok"] == "finished"
+    assert results["bad-utf16"] == "rejected"

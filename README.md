@@ -1,0 +1,220 @@
+# cloud-autopilot
+
+社会シミュレーターを、クラウド (Kaggle / Colab、拡張先として Google Cloud) で効率よく回すための
+runner 基盤。軸は「クラウドで回す」こと。無料枠は使える環境で優先するが、縛りではない。
+
+**シミュレーターの中身は作らない。** 作るのは「手元のシミュレーターを、クラウドの実行環境へ
+運んで実行し、結果と証跡を持ち帰る」部分だけ。誰でも自分のアカウントで clone して動かせる。
+
+## 目的
+
+シミュレーション実験は GPU が要るが、常時使える GPU を持たない人は多い。この repo は
+「手元のシミュレーターをクラウドへ運んで実行し、証跡付きで結果を持ち帰る」部分
+**だけ**を引き受け、誰でも自分のアカウントで再現できる形に保つ。
+
+## できること
+
+- ジョブ定義 (manifest) のスキーマと検証 — どのシミュレーターを・どの実行環境で・どの名義で回すか
+- 実行環境ごとの adapter (Kaggle / Colab / ローカル)
+- 実行の記録 (いつ・どこで・どの名義で・成功したか) を残す台帳
+- レート制限とクォータ切れへの対処 (バックオフ・自動再開・local への fallback)
+- 中断からの自動再開 (完了済みジョブはスキップ)
+
+**入れないもの (境界)**
+
+- アカウント名・メールアドレス・認証情報 — すべて `config.local.json` (gitignore 済) から読む
+- 実行結果・台帳・ジョブ出力 — gitignore。生成物は repo に置かない
+- 環境固有の識別子 (クラウドのプロジェクト名など)
+- シミュレーター本体の実装 (別 repo の責務)
+- 汎用 AI ジョブ実行基盤としての拡張 (用途をシミュレーターに絞る)
+
+## クイックスタート
+
+AI エージェントに任せる場合は、この URL を貼って「セットアップして」と依頼する:
+`https://github.com/nexus-ai-2045/cloud-autopilot`
+
+手動の場合 (前提: Python 3.10 以上。標準ライブラリのみで動く。テスト実行だけ pytest が必要):
+
+```bash
+git clone <this-repo> && cd cloud-autopilot
+
+# 1. 名義を登録する (config.local.json は commit されない)
+cp config.example.json config.local.json
+#    → エディタで開き、自分のアカウント名を記入
+
+# 2. まずローカルで動作確認 (クラウド不要)
+python autopilot.py queue
+
+# 3. Kaggle で実走 (要: kaggle CLI + ~/.kaggle/kaggle.json。runners/kaggle/README.md 参照)
+python autopilot.py run jobs/sim-smoke/job.json
+
+# 状態確認 / テスト
+python autopilot.py status
+python -m pytest tests/ -q
+#   Windows で tmp 権限エラーが出る場合:
+#   python -m pytest tests -q -p no:cacheprovider --basetemp=./.pytest-tmp
+```
+
+設定が無い・不備がある場合は**黙って動かず、何が足りないかを言って停止する** (fail-closed)。
+
+## 全体像
+
+```mermaid
+flowchart LR
+    subgraph 宣言
+        J[jobs/*/job.json<br/>manifest<br/>名義エイリアス必須]
+        C1[config.local.json<br/>エイリアス→実アカウント<br/>gitignore 済]
+    end
+    subgraph core
+        M[manifest 構造検証] --> R[IdentityBook<br/>名義解決<br/>未登録/取り違えは拒否]
+        R --> D[dispatcher<br/>キュー/自動再開/fallback]
+        D --> E[evaluator<br/>score 検証]
+        E --> L[(台帳 JSONL<br/>runs / rate_limit)]
+    end
+    subgraph runners
+        K[kaggle<br/>定常 GPU 枠]
+        CO[colab<br/>単発 GPU]
+        LO[local<br/>fallback]
+    end
+    J --> M
+    C1 --> R
+    D --> K & CO & LO
+    K --> A[api_client<br/>429/5xx のみ retry<br/>バックオフ付き]
+    A --> L
+```
+
+## ジョブの書き方
+
+`jobs/<job名>/job.json` に manifest を 1 つ置く:
+
+```json
+{
+  "name": "cloud-autopilot-sim-smoke",
+  "runner": "kaggle",
+  "identity": "kaggle-main",
+  "entrypoint": "kernel",
+  "gpu": true,
+  "fallback": ["local"]
+}
+```
+
+| フィールド | 意味 |
+|---|---|
+| `name` | ジョブ名。Kaggle では kernel slug にもなる |
+| `runner` | `kaggle` / `colab` / `local` |
+| `identity` | **config.local.json のエイリアス名** (実アカウント名は書かない)。必須 |
+| `entrypoint` | manifest からの相対パスで実行対象。**kaggle では `main.py` を含む dir 指定が必須** (local は dir / ファイルどちらも可) |
+| `gpu` | GPU 割当を要求するか |
+| `fallback` | 失敗時の退避先。**`local` のみ指定可** (外部名義への自動振替は名義事故のもと) |
+| `score_required` | true なら評価契約が必須になる (下記「評価契約」) |
+| `notes` | 任意の自由記述メモ |
+
+- `jobs/queue/` に manifest を置くと `python autopilot.py queue` が順に実行する。
+  終端状態 (`finished` / `failed`) のジョブはスキップされる
+  (= 中断しても再実行で続きから走る)。スキップした時は stderr に `[skipped]` と理由を出す。
+  終端ジョブをやり直すには `python autopilot.py run <manifest> --rerun` で明示的に再実行する
+  (終端 state を消して走らせ直し、台帳に `rerun_requested` を残す)
+- `rejected` (manifest 不備・名義未解決) は**終端ではない**。設定を直せば次回の実行で
+  自動的に再検証される。理由は stderr に出るほか、`python autopilot.py status` でも確認できる
+- 同じ `name` を宣言する manifest が queue に 2 つ以上あると、2 件目以降は rejected になる
+  (state が name キーのため、黙って先行ジョブの終端状態を借りてスキップされる事故を防ぐ)
+- 同梱 queue には clean clone + `config.local.json` だけで走るジョブしか置かない
+  ([ADR-0001](docs/adr/0001-queue-bundled-jobs-must-be-environment-independent.md))。外部 checkout や
+  外部 CLI が要るジョブは `jobs/<name>/job.json` に置き、`python autopilot.py run jobs/<name>/job.json` で明示実行する
+- サンプル: [jobs/sim-smoke/job.json](jobs/sim-smoke/job.json) — シード固定の Schelling 分居モデル。
+  同じシードなら Kaggle でもローカルでも同じ結果になる (再現性の実証)
+
+### 評価契約 (score)
+
+自動改善ループ (ラチェット・パラメータ探索) に乗せるジョブは、出力
+`<entrypoint>/output/sim_result.json` に**有限の数値 `score`** を書く。
+
+- manifest で `"score_required": true` を宣言したジョブは、score の無い完走・壊れた score を
+  **完走扱いにしない** (「成功ログ付きで何もしていない」空振りの機械検知 = 脅威モデル a)
+- 各 runner 呼び出しの前に前回の `sim_result.json` を破棄する。再実行で残った古い score を
+  今回の完走に流用しない
+- score は台帳の finished 記録に残り、実験系列の比較に使う。Kaggle runner 自身は出力回収を
+  `checkpoint` として記録し、完走判定は dispatcher の score 検証後に行う
+- colab runner は成果物を回収しないため、colab ジョブに `score_required` を付けると常に契約違反で止まる
+  (意図した fail-closed。[ADR-0002](docs/adr/0002-colab-runner-scope.md))
+- score を返せないジョブは宣言しなければ自由に走れる (ループには乗らない)
+
+## 名義の設計 (この repo の要)
+
+複数のクラウドアカウントを使い分けると、**意図しない名義でジョブが走る事故**が起きる。
+これをコードレビューではなく構造で防ぐ:
+
+1. manifest には**エイリアス** (`kaggle-main` 等) だけを書く。repo にアカウント名が入らない
+2. エイリアス → 実アカウントの解決は `config.local.json` (gitignore 済) が唯一の供給源
+3. エイリアスは runner に束縛される。kaggle 用の名義を colab ジョブに使うと実行前に停止
+4. 未登録エイリアス・プレースホルダ値のままの実行は拒否 (fail-closed)
+5. 台帳にはエイリアスと解決済みアカウントの両方が残る (どの名義で本当に走ったかの証跡)
+
+## 実行環境と無料枠 (2026-08 時点)
+
+| 環境 | 無料枠 | 向き | 制約 |
+|---|---|---|---|
+| Kaggle | GPU 週 30h (T4×2 / P100)、1 セッション 12h | 決まった学習・長時間ジョブ | GPU に電話番号認証。規約上 1 人 1 アカウント。polling 上限 (`runners/kaggle/run.py` の `POLL_TIMEOUT`) を超えると failed → fallback |
+| Colab | リソース保証なし、最長 12h | 対話実験・単発 GPU | 常駐・定期実行に不向き。CLI は Windows 非対応 (WSL 経由)。**成果物を回収しない** (exit code のみ) ため `score_required` 非対応 ([ADR-0002](docs/adr/0002-colab-runner-scope.md)) |
+| ローカル | 制限なし | 混雑時の退避先・機密データ | マシン性能に依存 |
+
+詳細は各 `runners/*/README.md`。
+
+Google Cloud (Cloud Run / GCE 等) は runner の拡張先。追加時に adapter・名義エイリアス・
+本表への行を同じ PR で揃える (無料枠に限定しない。課金が新たに発生する設定は人間承認のうえで使う)。
+
+## レート制限の扱い
+
+- 再試行してよいのは HTTP **429 と特定の 5xx のみ**。対象ステータスの正確な集合とバックオフの具体値
+  (初期待ち・上限・倍率・回数) は [`core/api_client.py`](core/api_client.py) 冒頭の定数が正本
+  (数値をここに再掲しない — 2 箇所更新の食い違いを作らないため)
+- それ以外のエラーは再試行しない (原因が消えていないのに繰り返さない)
+- 発生はすべて `data/rate_limit.jsonl` に記録 — 「体感はあるが実測がない」を無くす
+- 現状この経路を通るのは kaggle runner (CLI 呼び出し) のみ。colab / local は外部 API を
+  polling しないためバックオフ対象外
+
+## 脅威モデル (threat-model-first)
+
+- **誰から**: (a) 自走ジョブの空振り (成功ログ付きで何もしていない)、(b) 名義取り違え
+  (複数アカウント使い分け時の混在)、(c) 429・クォータ枯渇による黙った停止。
+- **何を守る**: 実行の帰属 (どの名義で何が走ったか) と結果の実在性 (本当に走った証跡)。
+- **どうなると困る**: 空振りを「完走」と誤認して積み上げる / 意図しない名義で実行・書込みが
+  起きる / 止まったのに誰も気づかない。
+- **守らないもの**: アカウント乗っ取り対策 (各サービスの認証に委ねる)、有料枠のコスト最適化、
+  シミュレーション内容の品質。
+
+## 制約と停止線
+
+- 新たに課金が発生しうる操作 (有料 GPU の起動・予算を増やす設定変更) は自動実行しない。
+  都度人間承認のうえで使う。GitHub Actions には課金しない
+- 複数アカウントでの枠増殖はしない (各環境の規約・無料枠の数値は
+  「実行環境と無料枠」の表が正本。ここに再掲しない)
+- バックオフが効くのは kaggle 経路のみ (詳細は「レート制限の扱い」)
+- `config.local.json` / `data/` / `jobs/**/output/` を commit しない (gitignore 済)
+- main への push は PR 経由
+
+## 構成
+
+```
+autopilot.py            CLI 入口 (queue / run / status)
+config.example.json     名義設定のひな型 (→ config.local.json にコピーして使う)
+core/
+  config.py             名義帳 (IdentityBook)。エイリアス解決と fail-closed 検証
+  manifest.py           ジョブ manifest の構造検証
+  evaluator.py          評価契約 (score の読取と検証)
+  api_client.py         429/5xx のみ retry するバックオフ
+  ledger.py             台帳 (JSONL 追記)
+  dispatcher.py         キュー実行・自動再開・fallback・score 検証
+runners/
+  registry.py           runner 登録
+  kaggle/               Kaggle kernel push→polling→出力回収
+  colab/                Colab 公式 CLI 経由 (Windows のみ WSL fallback)
+  local/                ローカル実行 (fallback 先)
+jobs/
+  sim-smoke/            サンプル: シード固定 Schelling モデル (kaggle + local fallback, score 契約)
+  sim-suite/            メタ安全保障 4 シミュレーターの実走 (queue 非同梱。run で明示実行。要: 製品 checkout + NPM_CMD)
+  queue/                ここに manifest を置くとキューに乗る
+.github/workflows/      CI (PR と main で pytest: ubuntu 3.10 / 3.13 + windows 3.13)
+docs/adr/               設計判断の記録 (ADR)。v2 の層ロードマップは ADR-0003
+tests/                  pytest (ユニット + 統合 + CLI E2E + サンプルの再現性検証)
+```
